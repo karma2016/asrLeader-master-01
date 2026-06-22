@@ -38,21 +38,10 @@ for env_file in \
   fi
 done
 
-prepend_env_path LD_LIBRARY_PATH /usr/local/Ascend/driver/lib64/common
-prepend_env_path LD_LIBRARY_PATH /usr/local/Ascend/driver/lib64/driver
-prepend_env_path LD_LIBRARY_PATH /usr/local/Ascend/driver/lib64
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/lib64"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/lib64/plugin/opskernel"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/lib64/plugin/nnengine"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/aarch64-linux/devlib"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/aarch64-linux/lib64"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/aarch64-linux/lib64/stub"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/runtime/lib64"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/runtime/lib64/stub"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/compiler/lib64"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/hccl/lib64"
-prepend_env_path LD_LIBRARY_PATH "${ASCEND_HOME_PATH}/tools/aml/lib64"
-prepend_env_path LD_LIBRARY_PATH /usr/local/Ascend/atb/latest/atb/cxx_abi_1/lib
+# Keep the exact library order from the working production old-base pod.
+# Reconstructing this path from generic CANN directories can load an
+# incompatible libacl_tdt_channel.so and fail with an undefined symbol.
+export LD_LIBRARY_PATH="/usr/local/Ascend/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/atb/latest/atb/cxx_abi_1/examples:/usr/local/Ascend/ascend-toolkit/latest/tools/aml/lib64:/usr/local/Ascend/ascend-toolkit/latest/tools/aml/lib64/plugin:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64/plugin/opskernel:/usr/local/Ascend/ascend-toolkit/latest/lib64/plugin/nnengine:/usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/ascend-toolkit/8.0.RC2/aarch64-linux/devlib/linux/aarch64:/usr/local/Ascend/nnal/atb/8.0.0/atb/cxx_abi_1/lib"
 prepend_env_path PYTHONPATH "${ASCEND_HOME_PATH}/python/site-packages"
 prepend_env_path PYTHONPATH "${ASCEND_OPP_PATH}/built-in/op_impl/ai_core/tbe"
 
@@ -101,4 +90,33 @@ fi
 
 echo "ASR NPU runtime: ASR_DEVICE=${ASR_DEVICE:-} ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-} ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-} ASR_RESOLVE_LOCAL_MODELS=${ASR_RESOLVE_LOCAL_MODELS:-} POSTPROCESS_PRELOAD=${POSTPROCESS_PRELOAD:-}"
 
-exec "$@"
+wait_attempts="${ASR_NPU_READY_ATTEMPTS:-30}"
+wait_seconds="${ASR_NPU_READY_INTERVAL_SECONDS:-2}"
+echo "Waiting for torch_npu backend and Ascend device..."
+
+for attempt in $(seq 1 "$wait_attempts"); do
+  if python - <<'PY'
+import torch
+import torch_npu  # noqa: F401
+
+if not hasattr(torch, "npu"):
+    raise SystemExit("torch.npu backend is not registered")
+
+count = torch.npu.device_count()
+if count < 1:
+    raise SystemExit("no Ascend NPU is visible")
+
+print(f"torch_npu ready: devices={count}")
+PY
+  then
+    exec "$@"
+  fi
+
+  if [ "$attempt" -lt "$wait_attempts" ]; then
+    echo "NPU is not ready yet (${attempt}/${wait_attempts}); retrying in ${wait_seconds}s..."
+    sleep "$wait_seconds"
+  fi
+done
+
+echo "NPU preflight failed after ${wait_attempts} attempts" >&2
+exit 1

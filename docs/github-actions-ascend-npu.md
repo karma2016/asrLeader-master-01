@@ -123,3 +123,9 @@ curl http://127.0.0.1:8000/health
 ```
 
 正常情况下，模型加载后返回里的 `device` 应该是 `npu:0`。
+# Production warning
+
+The generic GitHub Actions image is not the verified production path. The
+2026-06-12 production environment requires the existing
+`meeting-asr:npu-new-oldbase` image and its exact torch-npu/CANN runtime.
+Follow `docs/npu-production-update-runbook.md` for production releases.

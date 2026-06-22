@@ -60,7 +60,15 @@ class FunASRService:
         logger.info("SPK=%s", config.SPK_MODEL)
         logger.info("DEVICE=%s", self.device)
         if str(self.device).startswith("npu"):
+            import torch
             import torch_npu  # noqa: F401
+
+            if not hasattr(torch, "npu"):
+                raise RuntimeError("torch_npu was imported but torch.npu is unavailable")
+            device_count = torch.npu.device_count()
+            if device_count < 1:
+                raise RuntimeError("no Ascend NPU is visible to the ASR process")
+            logger.info("Ascend NPU backend is ready: devices=%s", device_count)
         self.model = AutoModel(
             model=config.ASR_MODEL,
             vad_model=config.VAD_MODEL,

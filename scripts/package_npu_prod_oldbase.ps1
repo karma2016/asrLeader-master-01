@@ -33,6 +33,15 @@ Copy-Item -LiteralPath (Join-Path $Root "docker\entrypoint.npu.sh") -Destination
 Copy-Item -LiteralPath (Join-Path $Root "docker\Dockerfile.npu-prod-oldbase") -Destination (Join-Path $PackageRoot "docker") -Force
 Copy-Item -LiteralPath (Join-Path $Root "scripts\build_npu_prod_oldbase_on_prod.sh") -Destination (Join-Path $PackageRoot "scripts") -Force
 Copy-Item -LiteralPath (Join-Path $Root "requirements-npu.txt") -Destination $PackageRoot -Force
+Copy-Item -LiteralPath (Join-Path $Root "docs\npu-production-update-runbook.md") -Destination $PackageRoot -Force
+
+$entrypointText = [System.IO.File]::ReadAllText((Join-Path $PackageRoot "docker\entrypoint.npu.sh"))
+if (-not $entrypointText.Contains("torch_npu ready: devices=")) {
+    throw "NPU entrypoint is missing the verified torch_npu preflight"
+}
+if (-not $entrypointText.Contains("/usr/local/Ascend/nnal/atb/8.0.0/atb/cxx_abi_1/lib")) {
+    throw "NPU entrypoint is missing the verified production LD_LIBRARY_PATH"
+}
 
 if ($IncludeQwen) {
     if (-not (Test-Path -LiteralPath $QwenSource)) {
@@ -108,10 +117,17 @@ chmod 755 scripts/build_npu_prod_oldbase_on_prod.sh
 IMAGE_TAG=__IMAGE_TAG__ bash scripts/build_npu_prod_oldbase_on_prod.sh
 ```
 
-Then update only the test/new deployment from master:
+Read `npu-production-update-runbook.md` before deployment. Route production
+traffic back to `dream-acr-new` before replacing the NPU Pod. When only one
+NPU is available, do not use a normal rolling update that attempts to start
+the old and new Pods together.
 
 ```bash
+kubectl -n test patch svc dream-acr --type=merge \
+  -p '{"spec":{"selector":{"app":"dream-acr-new"}}}'
+kubectl -n test scale deployment/asr-leader-npu --replicas=0
 kubectl -n test set image deployment/asr-leader-npu asr-leader-npu=__IMAGE_TAG__
+kubectl -n test scale deployment/asr-leader-npu --replicas=1
 kubectl -n test rollout status deployment/asr-leader-npu --timeout=10m
 kubectl -n test logs deployment/asr-leader-npu --tail=200 --timestamps
 ```
@@ -120,6 +136,8 @@ Do not modify these running production services:
 
 - `dream-acr`
 - `dream-acr-new`
+
+Keep `dream-acr-new` running as the immediate rollback target.
 
 Important NPU environment values for the deployment:
 

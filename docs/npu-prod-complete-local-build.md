@@ -1,5 +1,10 @@
 # NPU complete local build
 
+> Not recommended for the current production environment. The registry image
+> used by this workflow did not reproduce the runtime behavior of the working
+> production-only `meeting-asr:npu-new-oldbase` image. Use
+> `docs/npu-production-update-runbook.md` instead.
+
 Use this after pulling or loading the production NPU base image into local
 Docker.
 
