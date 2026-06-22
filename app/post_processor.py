@@ -46,7 +46,7 @@ class TranscriptPostProcessor:
         changed = False
         full_text = self._full_text(corrected)
         batches = self._batches(corrected)
-        for batch, suggestions in zip(batches, self._correct_batches(batches)):
+        for batch, suggestions in zip(batches, self._correct_batches(batches, full_text)):
             for segment, text in zip(batch, suggestions):
                 text = self._contextual_fallback(text, full_text)
                 if text and text != segment.get("text", ""):
@@ -65,12 +65,12 @@ class TranscriptPostProcessor:
                     segment["post_processed"] = True
         return corrected
 
-    def _correct_batches(self, batches: list[list[dict[str, Any]]]) -> list[list[str]]:
+    def _correct_batches(self, batches: list[list[dict[str, Any]]], full_text: str = "") -> list[list[str]]:
         if self.worker_count <= 1 or len(batches) <= 1:
-            return [self._correct_batch(batch) for batch in batches]
-        return self._correct_batches_parallel(batches)
+            return [self._correct_batch(batch, full_text) for batch in batches]
+        return self._correct_batches_parallel(batches, full_text)
 
-    def _correct_batches_parallel(self, batches: list[list[dict[str, Any]]]) -> list[list[str]]:
+    def _correct_batches_parallel(self, batches: list[list[dict[str, Any]]], full_text: str) -> list[list[str]]:
         worker_count = min(self.worker_count, len(batches))
         workers = self._get_workers()[:worker_count]
         assignments: list[list[tuple[int, list[dict[str, Any]]]]] = [[] for _ in range(worker_count)]
@@ -80,7 +80,7 @@ class TranscriptPostProcessor:
         results: list[list[str] | None] = [None] * len(batches)
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
-                executor.submit(self._run_worker_batches, workers[worker_index], worker_batches)
+                executor.submit(self._run_worker_batches, workers[worker_index], worker_batches, full_text)
                 for worker_index, worker_batches in enumerate(assignments)
                 if worker_batches
             ]
@@ -104,16 +104,17 @@ class TranscriptPostProcessor:
     def _run_worker_batches(
         worker: "TranscriptPostProcessor",
         batches: list[tuple[int, list[dict[str, Any]]]],
+        full_text: str = "",
     ) -> list[tuple[int, list[str]]]:
-        return [(index, worker._correct_batch(batch)) for index, batch in batches]
+        return [(index, worker._correct_batch(batch, full_text)) for index, batch in batches]
 
-    def _correct_batch(self, segments: list[dict[str, Any]]) -> list[str]:
+    def _correct_batch(self, segments: list[dict[str, Any]], full_text: str = "") -> list[str]:
         original = self._original_texts(segments)
         if not self._ensure_model():
             return original
 
         if self.provider == "deepseek":
-            return self._correct_batch_deepseek(original)
+            return self._correct_batch_deepseek(original, full_text)
 
         payload = [{"id": index, "text": text} for index, text in enumerate(original)]
         messages = self._messages(payload)
@@ -135,9 +136,9 @@ class TranscriptPostProcessor:
             logger.warning("ASR post-process model failed: %s", exc)
             return original
 
-    def _correct_batch_deepseek(self, original: list[str]) -> list[str]:
+    def _correct_batch_deepseek(self, original: list[str], full_text: str = "") -> list[str]:
         payload = [{"id": index, "text": text} for index, text in enumerate(original)]
-        messages = self._deepseek_messages(payload)
+        messages = self._deepseek_messages(payload, self._batch_context(full_text, "".join(original)))
         try:
             raw = self._call_deepseek(messages)
             parsed = self._parse_json_array(raw)
@@ -290,11 +291,14 @@ class TranscriptPostProcessor:
             return False
         if re.findall(r"\d+(?:\.\d+)?", original) != re.findall(r"\d+(?:\.\d+)?", corrected):
             return False
-        minimum_length = max(1, int(len(original) * 0.60))
-        maximum_length = max(len(original) + 20, int(len(original) * 1.50))
+        minimum_length = max(1, int(len(original) * 0.50))
+        maximum_length = max(
+            len(original) + config.POSTPROCESS_MAX_LENGTH_EXTRA,
+            int(len(original) * config.POSTPROCESS_MAX_LENGTH_RATIO),
+        )
         if not minimum_length <= len(corrected) <= maximum_length:
             return False
-        return SequenceMatcher(None, original, corrected).ratio() >= 0.55
+        return SequenceMatcher(None, original, corrected).ratio() >= config.POSTPROCESS_MIN_SIMILARITY
 
     @staticmethod
     def _parse_json_array(raw: str) -> Any:
@@ -379,22 +383,47 @@ class TranscriptPostProcessor:
         return batches
 
     @staticmethod
-    def _deepseek_messages(payload: list[dict[str, Any]]) -> list[dict[str, str]]:
+    def _batch_context(full_text: str, batch_text: str) -> str:
+        if not full_text or not batch_text or config.DEEPSEEK_CONTEXT_CHARS <= 0:
+            return ""
+        index = full_text.find(batch_text)
+        if index < 0:
+            return ""
+        start = max(0, index - config.DEEPSEEK_CONTEXT_CHARS)
+        end = min(len(full_text), index + len(batch_text) + config.DEEPSEEK_CONTEXT_CHARS)
+        return full_text[start:end]
+
+    @staticmethod
+    def _deepseek_messages(payload: list[dict[str, Any]], context: str = "") -> list[dict[str, str]]:
+        user_content = "原始分段 JSON：\n" + json.dumps({"items": payload}, ensure_ascii=False)
+        if context:
+            user_content = (
+                "前后文仅供理解术语和指代，禁止把上下文中不属于当前分段的内容补进输出：\n"
+                f"{context}\n\n"
+                + user_content
+            )
         return [
             {
                 "role": "system",
                 "content": (
-                    "你是中文会议语音转写校对器。只修正明确的 ASR 错字、同音误识别、领域术语和少量标点。"
-                    "不要总结、不要扩写、不要删减事实、不要改变原意；没有把握就保留原文。"
+                    "你是中文会议语音转写清稿校对器。任务是把 ASR 口语转写修成更准确、顺畅的会议文稿。"
+                    "重点修正错字、同音误识别、漏字导致的不通顺、领域术语和少量标点。"
+                    "可以在不改变意思的前提下补齐少量虚词、介词和明显漏识别词，但不要总结、不要扩写、不要删减事实。"
+                    "没有把握就保留原文。"
                     "必须保留输入分段数量和 id，必须逐段返回。不要修改数字、时间、人名、单位名和专有名词，"
                     "除非上下文和术语表提供明确依据。优先参考以下会议领域术语："
                     f"{config.ASR_HOTWORDS}。"
+                    "常见错听纠正：随身办/随身带/随身版应结合上下文优先判断为随申办；"
+                    "行动办公/协动办公/系动办公优先判断为协同办公；组织架构数优先判断为组织架构树；"
+                    "生小猪/孙小猪优先判断为申小助；公共知识库/公共公共知识库优先判断为共性知识库；"
+                    "下量库/相量库/片面化优先判断为向量库或向量化；搅和/教核优先判断为校核；"
+                    "K/KK/k 在接口、调用、申请、开通语境下优先规范为 key。"
                     '只输出 JSON 对象，格式为 {"items":[{"id":0,"text":"修正后的文本"}]}。'
                 ),
             },
             {
                 "role": "user",
-                "content": "原始分段 JSON：\n" + json.dumps({"items": payload}, ensure_ascii=False),
+                "content": user_content,
             },
         ]
 

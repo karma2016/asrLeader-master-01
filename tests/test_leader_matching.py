@@ -304,6 +304,15 @@ class LeaderMatchingTests(unittest.TestCase):
             processor = TranscriptPostProcessor(use_worker_pool=False)
             self.assertFalse(processor._ensure_model())
 
+    def test_deepseek_batch_prompt_includes_surrounding_context(self) -> None:
+        with patch.object(config, "DEEPSEEK_CONTEXT_CHARS", 4):
+            context = TranscriptPostProcessor._batch_context("abcdHELLOefgh", "HELLO")
+            messages = TranscriptPostProcessor._deepseek_messages([{"id": 0, "text": "HELLO"}], context)
+
+        self.assertEqual("abcdHELLOefgh", context)
+        self.assertIn("前后文", messages[1]["content"])
+        self.assertIn('"items"', messages[1]["content"])
+
     def test_text_normalizer_repairs_mojibake_response_text(self) -> None:
         text = "灏变細鏈夋潈闄愩€傛潈闄愯繖鍧楀憿"
 
@@ -330,6 +339,25 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertIn("调接口", fixed)
         self.assertIn("key 是不是", fixed)
         self.assertIn("直接调用", fixed)
+
+    def test_text_normalizer_repairs_meeting_specific_suishenban_phrases(self) -> None:
+        text = "至少随身带你们一部，不要现在随申办你面一个，用户体系不就是随申办的可吗？都是通过随申办的工。"
+
+        fixed = normalize_asr_text(text)
+
+        self.assertIn("随申办里面有一部分", fixed)
+        self.assertIn("随申办里面有", fixed)
+        self.assertIn("随申办的卡吗", fixed)
+        self.assertIn("通过随申办登录", fixed)
+
+    def test_text_normalizer_repairs_llm_meeting_specific_regressions(self) -> None:
+        text = "主子分好了吧。这个只是主子的。但是分中心除外，分中心范围是配齐的。"
+
+        fixed = normalize_asr_text(text)
+
+        self.assertIn("主旨分好了", fixed)
+        self.assertIn("只是主旨的", fixed)
+        self.assertIn("四分中心除外，四分中心范围", fixed)
 
 
 if __name__ == "__main__":
