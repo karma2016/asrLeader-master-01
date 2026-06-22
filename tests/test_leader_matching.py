@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+sys.modules.setdefault("funasr", SimpleNamespace(AutoModel=object))
+
 import config
 from model_service import FunASRService
+from post_processor import TranscriptPostProcessor
 
 
 def candidate(
@@ -155,6 +160,57 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertEqual(segments[0]["speaker"], segments[2]["speaker"])
         self.assertEqual(segments[0]["speaker"], segments[3]["speaker"])
         self.assertNotEqual(segments[0]["speaker"], segments[1]["speaker"])
+
+    def test_transcript_quality_flags_long_mixed_speaker_segments(self) -> None:
+        segments = [
+            {"speaker": "0", "start_time": 0.0, "end_time": 1545.0},
+            {"speaker": "1", "start_time": 1545.0, "end_time": 1600.0},
+        ]
+
+        with (
+            patch.object(config, "ASR_QUALITY_MAX_SEGMENT_SECONDS", 120.0),
+            patch.object(config, "ASR_QUALITY_DOMINANT_SPEAKER_RATIO", 0.70),
+            patch.object(config, "ASR_QUALITY_MIN_EXPECTED_SPEAKERS", 2),
+            patch.object(config, "ASR_QUALITY_MIN_SEGMENTS_PER_HOUR", 60.0),
+        ):
+            quality = FunASRService.transcript_quality(segments, audio_duration=2114.7)
+
+        self.assertEqual("warning", quality["status"])
+        self.assertIn("segment_too_long", quality["warnings"])
+        self.assertIn("dominant_speaker_too_large", quality["warnings"])
+        self.assertIn("too_few_segments", quality["warnings"])
+        self.assertEqual("0", quality["dominant_speaker"])
+
+    def test_transcript_quality_accepts_balanced_segments(self) -> None:
+        segments = []
+        for index in range(120):
+            speaker = str(index % 3)
+            start = index * 10.0
+            segments.append(
+                {
+                    "speaker": speaker,
+                    "start_time": start,
+                    "end_time": start + 8.0,
+                }
+            )
+
+        quality = FunASRService.transcript_quality(segments, audio_duration=1200.0)
+
+        self.assertEqual("ok", quality["status"])
+        self.assertEqual([], quality["warnings"])
+        self.assertEqual(3, quality["speaker_count"])
+
+    def test_contextual_fallback_normalizes_domain_terms(self) -> None:
+        text = "随身办的智智能体接入下量库，孙小猪会讲骂死和pass。"
+
+        fixed = TranscriptPostProcessor._contextual_fallback(text, "")
+
+        self.assertIn("随申办", fixed)
+        self.assertIn("智能体", fixed)
+        self.assertIn("向量库", fixed)
+        self.assertIn("申小助", fixed)
+        self.assertIn("MaaS", fixed)
+        self.assertIn("PaaS", fixed)
 
 
 if __name__ == "__main__":

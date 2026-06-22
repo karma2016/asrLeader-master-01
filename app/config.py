@@ -42,11 +42,43 @@ SPK_MODEL = _resolve_model("SPK_MODEL", SPK_MODEL_ALIAS)
 HOST = os.getenv("ASR_HOST", "0.0.0.0")
 PORT = int(os.getenv("ASR_PORT", "8000"))
 DEVICE = os.getenv("ASR_DEVICE", "auto")
-BATCH_SIZE_S = int(os.getenv("BATCH_SIZE_S", "300"))
+BATCH_SIZE_S = int(os.getenv("BATCH_SIZE_S", "120"))
+VAD_MAX_SINGLE_SEGMENT_TIME_MS = int(os.getenv("VAD_MAX_SINGLE_SEGMENT_TIME_MS", "30000"))
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", str(1024 * 1024 * 1024)))
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac"}
 ALLOWED_AUDIO_FORMATS = ["WAV", "MP3", "M4A", "AAC"]
-ASR_HOTWORDS = os.getenv("ASR_HOTWORDS", "")
+DEFAULT_ASR_HOTWORDS = " ".join(
+    [
+        "随申办",
+        "申小助",
+        "MaaS",
+        "PaaS",
+        "OA",
+        "ETL",
+        "WPS",
+        "共性能力",
+        "共性智能体",
+        "共性知识库",
+        "共享空间",
+        "电子公文库",
+        "公文校核",
+        "向量库",
+        "向量化",
+        "一体化协同",
+        "协同办公",
+        "委办局",
+        "大数据中心",
+        "数据局",
+        "政务公开",
+        "知识库",
+        "数据库",
+    ]
+)
+ASR_HOTWORDS = os.getenv("ASR_HOTWORDS") or DEFAULT_ASR_HOTWORDS
+ASR_QUALITY_MAX_SEGMENT_SECONDS = float(os.getenv("ASR_QUALITY_MAX_SEGMENT_SECONDS", "120"))
+ASR_QUALITY_DOMINANT_SPEAKER_RATIO = float(os.getenv("ASR_QUALITY_DOMINANT_SPEAKER_RATIO", "0.70"))
+ASR_QUALITY_MIN_EXPECTED_SPEAKERS = int(os.getenv("ASR_QUALITY_MIN_EXPECTED_SPEAKERS", "2"))
+ASR_QUALITY_MIN_SEGMENTS_PER_HOUR = float(os.getenv("ASR_QUALITY_MIN_SEGMENTS_PER_HOUR", "60"))
 LEADER_DB_PATH = Path(os.getenv("LEADER_DB_PATH", str(DATA_DIR / "leaders.json")))
 LEADER_THRESHOLD = float(os.getenv("LEADER_THRESHOLD", "0.45"))
 LEADER_SPEAKER_THRESHOLD = float(os.getenv("LEADER_SPEAKER_THRESHOLD", "0.35"))

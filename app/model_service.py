@@ -59,6 +59,8 @@ class FunASRService:
         logger.info("PUNC=%s", config.PUNC_MODEL)
         logger.info("SPK=%s", config.SPK_MODEL)
         logger.info("DEVICE=%s", self.device)
+        logger.info("VAD_MAX_SINGLE_SEGMENT_TIME_MS=%s", config.VAD_MAX_SINGLE_SEGMENT_TIME_MS)
+        logger.info("BATCH_SIZE_S=%s", config.BATCH_SIZE_S)
         if str(self.device).startswith("npu"):
             import torch
             import torch_npu  # noqa: F401
@@ -76,8 +78,15 @@ class FunASRService:
             spk_model=config.SPK_MODEL,
             device=self.device,
             disable_update=True,
+            vad_kwargs=self._vad_kwargs(),
         )
         logger.info("FunASR models are ready")
+
+    @staticmethod
+    def _vad_kwargs() -> dict[str, Any]:
+        if config.VAD_MAX_SINGLE_SEGMENT_TIME_MS <= 0:
+            return {}
+        return {"max_single_segment_time": config.VAD_MAX_SINGLE_SEGMENT_TIME_MS}
 
     def transcribe(
         self,
@@ -117,6 +126,76 @@ class FunASRService:
                 )
 
         return self._refine_speaker_labels(audio_path, segments, num_speakers)
+
+    @staticmethod
+    def transcript_quality(
+        segments: list[dict[str, Any]],
+        audio_duration: float | None = None,
+    ) -> dict[str, Any]:
+        if not segments:
+            return {
+                "status": "empty",
+                "warnings": ["no_segments"],
+                "segment_count": 0,
+                "speaker_count": 0,
+            }
+
+        durations = [
+            max(0.0, float(segment["end_time"]) - float(segment["start_time"]))
+            for segment in segments
+        ]
+        total_segment_seconds = sum(durations)
+        if audio_duration is None:
+            audio_duration = max(float(segment["end_time"]) for segment in segments)
+
+        speaker_seconds: dict[str, float] = {}
+        speaker_segments: dict[str, int] = {}
+        for segment, duration in zip(segments, durations):
+            speaker = str(segment.get("speaker", ""))
+            speaker_seconds[speaker] = speaker_seconds.get(speaker, 0.0) + duration
+            speaker_segments[speaker] = speaker_segments.get(speaker, 0) + 1
+
+        dominant_speaker = max(speaker_seconds, key=speaker_seconds.get)
+        dominant_ratio = speaker_seconds[dominant_speaker] / max(total_segment_seconds, 0.001)
+        max_segment_seconds = max(durations)
+        segment_count = len(segments)
+        speaker_count = len(speaker_seconds)
+        segments_per_hour = segment_count / max(audio_duration / 3600.0, 0.001)
+        coverage_ratio = total_segment_seconds / max(audio_duration, 0.001)
+
+        warnings: list[str] = []
+        if max_segment_seconds > config.ASR_QUALITY_MAX_SEGMENT_SECONDS:
+            warnings.append("segment_too_long")
+        if speaker_count < config.ASR_QUALITY_MIN_EXPECTED_SPEAKERS and audio_duration >= 300:
+            warnings.append("too_few_speakers")
+        if dominant_ratio > config.ASR_QUALITY_DOMINANT_SPEAKER_RATIO and audio_duration >= 300:
+            warnings.append("dominant_speaker_too_large")
+        if segments_per_hour < config.ASR_QUALITY_MIN_SEGMENTS_PER_HOUR and audio_duration >= 300:
+            warnings.append("too_few_segments")
+
+        return {
+            "status": "warning" if warnings else "ok",
+            "warnings": warnings,
+            "segment_count": segment_count,
+            "speaker_count": speaker_count,
+            "audio_duration_seconds": round(audio_duration, 2),
+            "total_segment_seconds": round(total_segment_seconds, 2),
+            "coverage_ratio": round(coverage_ratio, 4),
+            "max_segment_seconds": round(max_segment_seconds, 2),
+            "average_segment_seconds": round(total_segment_seconds / segment_count, 2),
+            "segments_per_hour": round(segments_per_hour, 2),
+            "dominant_speaker": dominant_speaker,
+            "dominant_speaker_ratio": round(dominant_ratio, 4),
+            "speaker_seconds": {
+                speaker: round(seconds, 2)
+                for speaker, seconds in sorted(
+                    speaker_seconds.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+            },
+            "speaker_segments": dict(sorted(speaker_segments.items())),
+        }
 
     def extract_voiceprint(self, audio_path: str) -> list[float]:
         self._ensure_loaded()

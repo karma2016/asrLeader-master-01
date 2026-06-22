@@ -247,6 +247,44 @@ class TranscriptPostProcessor:
     @staticmethod
     def _contextual_fallback(text: str, full_text: str) -> str:
         del full_text
+        replacements = {
+            "随身办": "随申办",
+            "智智能体": "智能体",
+            "自能体": "智能体",
+            "职能体": "智能体",
+            "下量库": "向量库",
+            "下量图": "向量库",
+            "相量库": "向量库",
+            "像量库": "向量库",
+            "下量化": "向量化",
+            "相量化": "向量化",
+            "像量化": "向量化",
+            "片面化": "向量化",
+            "教核": "校核",
+            "搅核": "校核",
+            "公文教核": "公文校核",
+            "公文搅核": "公文校核",
+            "共信智能体": "共性智能体",
+            "共信知识库": "共性知识库",
+            "公应知识库": "共性知识库",
+            "电子公共库": "电子公文库",
+            "电子功能库": "电子公文库",
+            "肾小柱": "申小助",
+            "生小猪": "申小助",
+            "孙小猪": "申小助",
+            "声小注": "申小助",
+            "深小柱": "申小助",
+            "称小猪": "申小助",
+            "骂死": "MaaS",
+            "马斯": "MaaS",
+            "妈是": "MaaS",
+            "OOA": "OA",
+        }
+        for source, target in replacements.items():
+            text = text.replace(source, target)
+        text = re.sub(r"(?<![A-Za-z])(?:mast|mass)(?![A-Za-z])", "MaaS", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?<![A-Za-z])pass(?![A-Za-z])", "PaaS", text, flags=re.IGNORECASE)
+        text = re.sub(r"共性知识或共性[，,、]?\s*智能体", "共性知识库和共性智能体", text)
         return text
 
     @staticmethod
@@ -279,6 +317,8 @@ class TranscriptPostProcessor:
                     "你是中文会议语音转写的校对器。只根据上下文修正明确的 ASR "
                     "错字、同音误识别和不通顺短语。不得总结、扩写、删减事实或改变原意；"
                     "不得修改数字、人名、单位名和专业术语，除非上下文提供了明确依据。"
+                    "优先参考以下会议领域术语，修正明显同音错词："
+                    f"{config.ASR_HOTWORDS}。"
                     "保留分段数量和 id，只输出 JSON 数组，格式为 "
                     '[{"id":0,"text":"修正后的文本"}]。'
                     "没有把握时必须保留原文。"

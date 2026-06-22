@@ -212,6 +212,11 @@ def effective_speech_seconds(path: str) -> float:
     return round(active_chunks * chunk_ms / 1000.0, 2)
 
 
+def audio_duration_seconds(path: str) -> float:
+    with wave.open(path, "rb") as audio:
+        return round(audio.getnframes() / max(audio.getframerate(), 1), 2)
+
+
 def validate_enrollment_samples(
     samples: list[tuple[list[float], str | None, float]],
 ) -> dict[str, Any]:
@@ -367,6 +372,15 @@ async def health():
         "postprocess_sync_max_chars": config.POSTPROCESS_SYNC_MAX_CHARS if config.POSTPROCESS_ENABLED else 0,
         "postprocess_sync_timeout_seconds": config.POSTPROCESS_SYNC_TIMEOUT_SECONDS if config.POSTPROCESS_ENABLED else 0,
         "correction_task_workers": config.CORRECTION_TASK_WORKERS if config.POSTPROCESS_ENABLED else 0,
+        "batch_size_s": config.BATCH_SIZE_S,
+        "vad_max_single_segment_time_ms": config.VAD_MAX_SINGLE_SEGMENT_TIME_MS,
+        "default_hotwords_enabled": bool(config.ASR_HOTWORDS.strip()),
+        "quality_thresholds": {
+            "max_segment_seconds": config.ASR_QUALITY_MAX_SEGMENT_SECONDS,
+            "dominant_speaker_ratio": config.ASR_QUALITY_DOMINANT_SPEAKER_RATIO,
+            "min_expected_speakers": config.ASR_QUALITY_MIN_EXPECTED_SPEAKERS,
+            "min_segments_per_hour": config.ASR_QUALITY_MIN_SEGMENTS_PER_HOUR,
+        },
     }
 
 
@@ -404,6 +418,9 @@ async def transcribe(
                 return_leader_scores,
             )
         result = asr_service._merge_adjacent_segments(result)
+        asr_quality = asr_service.transcript_quality(result, audio_duration_seconds(path))
+        if asr_quality["status"] != "ok":
+            logger.warning("ASR quality warnings: %s", asr_quality)
         should_correct_text = post_process if correct_text is None else correct_text
         mode = normalize_correction_mode(correction_mode)
         if mode == "none":
@@ -413,20 +430,28 @@ async def transcribe(
                 mode == "auto" and segment_text_chars(result) > config.POSTPROCESS_SYNC_MAX_CHARS
             ):
                 task_id, _ = submit_correction_task(result, mode)
-                return transcribe_ok(result, **correction_pending_fields(task_id, mode))
+                return transcribe_ok(
+                    result,
+                    asr_quality=asr_quality,
+                    **correction_pending_fields(task_id, mode),
+                )
 
             task_id, future = submit_correction_task(result, mode)
             try:
                 await asyncio.wait_for(asyncio.wrap_future(future), timeout=config.POSTPROCESS_SYNC_TIMEOUT_SECONDS)
                 task = get_correction_task(task_id)
                 if task and task.get("status") == "completed":
-                    return transcribe_ok(task.get("result", result))
+                    return transcribe_ok(task.get("result", result), asr_quality=asr_quality)
                 if task and task.get("status") == "failed":
                     logger.warning("ASR correction task failed, returning raw ASR: %s", task.get("error"))
-                    return transcribe_ok(result)
+                    return transcribe_ok(result, asr_quality=asr_quality)
             except asyncio.TimeoutError:
-                return transcribe_ok(result, **correction_pending_fields(task_id, "timeout"))
-        return transcribe_ok(result)
+                return transcribe_ok(
+                    result,
+                    asr_quality=asr_quality,
+                    **correction_pending_fields(task_id, "timeout"),
+                )
+        return transcribe_ok(result, asr_quality=asr_quality)
     finally:
         try:
             os.remove(path)
