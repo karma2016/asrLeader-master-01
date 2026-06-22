@@ -222,7 +222,8 @@ class LeaderMatchingTests(unittest.TestCase):
                 }
             )
 
-        quality = FunASRService.transcript_quality(segments, audio_duration=1200.0)
+        with patch.object(config, "ASR_QUALITY_MIN_EXPECTED_SPEAKERS", 3):
+            quality = FunASRService.transcript_quality(segments, audio_duration=1200.0)
 
         self.assertEqual("ok", quality["status"])
         self.assertEqual([], quality["warnings"])
@@ -242,6 +243,28 @@ class LeaderMatchingTests(unittest.TestCase):
             patch.object(config, "ASR_RETRY_MIN_AUDIO_SECONDS", 300.0),
             patch.object(config, "ASR_RETRY_MAX_SEGMENT_SECONDS", 180.0),
             patch.object(config, "ASR_RETRY_DOMINANT_SPEAKER_RATIO", 0.80),
+        ):
+            should_retry = FunASRService.should_retry_diarization(
+                quality,
+                requested_speakers=None,
+                audio_duration=2114.72,
+            )
+
+        self.assertTrue(should_retry)
+
+    def test_too_few_speakers_triggers_auto_retry(self) -> None:
+        quality = {
+            "warnings": ["too_few_speakers"],
+            "max_segment_seconds": 47.37,
+            "dominant_speaker_ratio": 0.4283,
+            "speaker_count": 4,
+        }
+
+        with (
+            patch.object(config, "ASR_AUTO_RETRY_BAD_DIARIZATION", True),
+            patch.object(config, "ASR_QUALITY_MIN_EXPECTED_SPEAKERS", 5),
+            patch.object(config, "ASR_FALLBACK_SPEAKER_NUM", 6),
+            patch.object(config, "ASR_RETRY_MIN_AUDIO_SECONDS", 300.0),
         ):
             should_retry = FunASRService.should_retry_diarization(
                 quality,
@@ -278,12 +301,52 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertEqual(1, candidates[0][0])
         self.assertIn("suspect_terms", candidates[0][1])
 
+    def test_rescue_candidates_include_long_segments(self) -> None:
+        segments = [
+            {"speaker": "0", "start_time": 0.0, "end_time": 3.0, "text": "正常文本"},
+            {
+                "speaker": "0",
+                "start_time": 4.0,
+                "end_time": 24.0,
+                "text": "这个片段比较长，容易把多个人的内容混在一起，需要二路识别复核。",
+            },
+        ]
+
+        with (
+            patch.object(config, "ASR_RESCUE_MAX_SEGMENT_SECONDS", 60.0),
+            patch.object(config, "ASR_RESCUE_LONG_SEGMENT_SECONDS", 10.0),
+        ):
+            candidates = FunASRService._rescue_candidates(segments)
+
+        self.assertEqual(1, candidates[0][0])
+        self.assertIn("long_segment", candidates[0][1])
+
+    def test_rescue_candidates_include_noisy_ascii_terms(self) -> None:
+        segments = [
+            {"speaker": "0", "start_time": 0.0, "end_time": 2.0, "text": "正常 key 调用"},
+            {"speaker": "0", "start_time": 3.0, "end_time": 5.0, "text": "数据库采1t1的时候再去处理"},
+        ]
+
+        candidates = FunASRService._rescue_candidates(segments)
+
+        self.assertEqual(1, candidates[0][0])
+        self.assertIn("noise_terms", candidates[0][1])
+
     def test_rescue_replacement_accepts_reduced_bad_terms(self) -> None:
         self.assertTrue(
             FunASRService._accept_rescue_text(
                 "非国产机的是候可以的",
                 "非国产机的时候可以的",
                 2.0,
+            )
+        )
+
+    def test_rescue_replacement_accepts_reduced_noise_terms(self) -> None:
+        self.assertTrue(
+            FunASRService._accept_rescue_text(
+                "这里是现量化的文件",
+                "这里是向量化的文件",
+                5.0,
             )
         )
 
@@ -322,6 +385,47 @@ class LeaderMatchingTests(unittest.TestCase):
                 4.0,
             )
         )
+
+    def test_rescue_replacement_rejects_new_suspect_terms(self) -> None:
+        self.assertFalse(
+            FunASRService._accept_rescue_text(
+                "申小助里面的共性知识库",
+                "生小度里面的供需知识库",
+                4.0,
+            )
+        )
+
+    def test_rescue_replacement_rejects_domain_term_loss(self) -> None:
+        self.assertFalse(
+            FunASRService._accept_rescue_text(
+                "申小助上面的共性知识库可以调用智能体。",
+                "上面的知识库可以调用智能体。",
+                5.0,
+            )
+        )
+
+    def test_rescue_result_text_strips_sensevoice_tags(self) -> None:
+        text = FunASRService._rescue_results_text(
+            [{"text": "<|zh|><|NEUTRAL|><|Speech|><|withitn|>测试环境"}]
+        )
+
+        self.assertEqual("测试环境", text)
+
+    def test_rescue_provider_falls_back_to_funasr(self) -> None:
+        service = FunASRService.__new__(FunASRService)
+        with (
+            patch.object(config, "ASR_RESCUE_PROVIDER", "sensevoice"),
+            patch.object(
+                FunASRService,
+                "_recognize_sensevoice_rescue_clip",
+                side_effect=RuntimeError("missing model"),
+            ),
+            patch.object(FunASRService, "_recognize_funasr_rescue_clip", return_value="fallback text"),
+        ):
+            text, provider = service._recognize_rescue_clip("clip.wav", "")
+
+        self.assertEqual("fallback text", text)
+        self.assertEqual("funasr", provider)
 
     def test_contextual_fallback_normalizes_domain_terms(self) -> None:
         text = "随身办的智智能体接入下量库，孙小猪会讲骂死和pass。"
@@ -368,6 +472,25 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertEqual("abcdHELLOefgh", context)
         self.assertIn("前后文", messages[1]["content"])
         self.assertIn('"items"', messages[1]["content"])
+
+    def test_deepseek_prompt_includes_rescue_candidate_hint(self) -> None:
+        payload = TranscriptPostProcessor._payload_items(
+            [
+                {
+                    "text": "生好喝哪天再刷不好了",
+                    "asr_rescue_candidate": "分好了，哪些带项目到时候你下拉个清单",
+                    "asr_rescue_provider": "sensevoice",
+                    "asr_rescue_reason": "noise_terms",
+                }
+            ],
+            ["生好喝哪天再刷不好了"],
+        )
+
+        messages = TranscriptPostProcessor._deepseek_messages(payload, "")
+
+        self.assertIn("asr_candidate", messages[1]["content"])
+        self.assertIn("另一路 ASR", messages[1]["content"])
+        self.assertIn("分好了", messages[1]["content"])
 
     def test_text_normalizer_repairs_mojibake_response_text(self) -> None:
         text = "灏变細鏈夋潈闄愩€傛潈闄愯繖鍧楀憿"

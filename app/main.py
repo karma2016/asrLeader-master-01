@@ -400,6 +400,11 @@ async def health():
             "padding_ms": config.ASR_RESCUE_PADDING_MS,
             "preset_speaker_num": config.ASR_RESCUE_PRESET_SPEAKER_NUM,
             "min_similarity": config.ASR_RESCUE_MIN_SIMILARITY,
+            "noise_min_similarity": config.ASR_RESCUE_NOISE_MIN_SIMILARITY,
+            "provider": config.ASR_RESCUE_PROVIDER,
+            "model": config.ASR_RESCUE_MODEL if config.ASR_RESCUE_PROVIDER == "sensevoice" else None,
+            "language": config.ASR_RESCUE_LANGUAGE,
+            "audit_samples": config.ASR_RESCUE_AUDIT_SAMPLES,
         },
     }
 

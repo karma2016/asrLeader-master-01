@@ -113,10 +113,10 @@ class TranscriptPostProcessor:
         if not self._ensure_model():
             return original
 
+        payload = self._payload_items(segments, original)
         if self.provider == "deepseek":
-            return self._correct_batch_deepseek(original, full_text)
+            return self._correct_batch_deepseek(payload, original, full_text)
 
-        payload = [{"id": index, "text": text} for index, text in enumerate(original)]
         messages = self._messages(payload)
         try:
             prompt = self._format_prompt(messages)
@@ -136,8 +136,12 @@ class TranscriptPostProcessor:
             logger.warning("ASR post-process model failed: %s", exc)
             return original
 
-    def _correct_batch_deepseek(self, original: list[str], full_text: str = "") -> list[str]:
-        payload = [{"id": index, "text": text} for index, text in enumerate(original)]
+    def _correct_batch_deepseek(
+        self,
+        payload: list[dict[str, Any]],
+        original: list[str],
+        full_text: str = "",
+    ) -> list[str]:
         messages = self._deepseek_messages(payload, self._batch_context(full_text, "".join(original)))
         try:
             raw = self._call_deepseek(messages)
@@ -185,6 +189,19 @@ class TranscriptPostProcessor:
     @staticmethod
     def _original_texts(segments: list[dict[str, Any]]) -> list[str]:
         return [str(segment.get("text", "")) for segment in segments]
+
+    @staticmethod
+    def _payload_items(segments: list[dict[str, Any]], original: list[str]) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = []
+        for index, (segment, text) in enumerate(zip(segments, original)):
+            item: dict[str, Any] = {"id": index, "text": text}
+            candidate = str(segment.get("asr_rescue_candidate") or "").strip()
+            if candidate and candidate != text:
+                item["asr_candidate"] = candidate
+                item["asr_candidate_provider"] = segment.get("asr_rescue_provider")
+                item["asr_candidate_reason"] = segment.get("asr_rescue_reason")
+            payload.append(item)
+        return payload
 
     def _ensure_model(self) -> bool:
         if self.provider == "deepseek":
@@ -396,6 +413,13 @@ class TranscriptPostProcessor:
     @staticmethod
     def _deepseek_messages(payload: list[dict[str, Any]], context: str = "") -> list[dict[str, str]]:
         user_content = "原始分段 JSON：\n" + json.dumps({"items": payload}, ensure_ascii=False)
+        if any("asr_candidate" in item for item in payload):
+            user_content = (
+                "部分分段包含 asr_candidate 字段，它是另一路 ASR 对同一段音频的候选听写，只能作为纠错线索。"
+                "当原文和候选冲突时，请结合上下文、领域术语和语义选择；没有把握必须保留原文，"
+                "不要把候选里的新错词、错名词或多余内容带入输出。\n\n"
+                + user_content
+            )
         if context:
             user_content = (
                 "前后文仅供理解术语和指代，禁止把上下文中不属于当前分段的内容补进输出：\n"
