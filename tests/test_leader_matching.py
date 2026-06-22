@@ -279,6 +279,31 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertIn("MaaS", fixed)
         self.assertIn("PaaS", fixed)
 
+    def test_deepseek_provider_uses_json_object_response(self) -> None:
+        with (
+            patch.object(config, "POSTPROCESS_PROVIDER", "deepseek"),
+            patch.object(config, "DEEPSEEK_API_KEY", "test-key"),
+        ):
+            processor = TranscriptPostProcessor(use_worker_pool=False)
+            with patch.object(
+                processor,
+                "_call_deepseek",
+                return_value='{"items":[{"id":0,"text":"hello world"}]}',
+            ) as deepseek_call:
+                result = processor._correct_batch([{"text": "hello word"}])
+
+        self.assertEqual(["hello world"], result)
+        messages = deepseek_call.call_args.args[0]
+        self.assertIn('"items"', messages[0]["content"])
+
+    def test_deepseek_provider_requires_api_key(self) -> None:
+        with (
+            patch.object(config, "POSTPROCESS_PROVIDER", "deepseek"),
+            patch.object(config, "DEEPSEEK_API_KEY", ""),
+        ):
+            processor = TranscriptPostProcessor(use_worker_pool=False)
+            self.assertFalse(processor._ensure_model())
+
     def test_text_normalizer_repairs_mojibake_response_text(self) -> None:
         text = "灏变細鏈夋潈闄愩€傛潈闄愯繖鍧楀憿"
 

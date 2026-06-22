@@ -6,6 +6,11 @@ __pycache__/
 data/
 deploy/ascend-npu/data/
 
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
 # Docker and offline package artifacts
 *.tar
 *.tar.part-*

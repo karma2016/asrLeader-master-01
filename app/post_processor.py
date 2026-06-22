@@ -4,6 +4,8 @@ import json
 import logging
 import re
 import threading
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 class TranscriptPostProcessor:
     def __init__(self, use_worker_pool: bool = True) -> None:
         self.enabled = config.POSTPROCESS_ENABLED
+        self.provider = config.POSTPROCESS_PROVIDER
         self.model_id = config.POSTPROCESS_MODEL
         self.device = config.POSTPROCESS_DEVICE
         self.worker_count = config.POSTPROCESS_WORKERS if use_worker_pool else 1
@@ -109,6 +112,9 @@ class TranscriptPostProcessor:
         if not self._ensure_model():
             return original
 
+        if self.provider == "deepseek":
+            return self._correct_batch_deepseek(original)
+
         payload = [{"id": index, "text": text} for index, text in enumerate(original)]
         messages = self._messages(payload)
         try:
@@ -129,11 +135,59 @@ class TranscriptPostProcessor:
             logger.warning("ASR post-process model failed: %s", exc)
             return original
 
+    def _correct_batch_deepseek(self, original: list[str]) -> list[str]:
+        payload = [{"id": index, "text": text} for index, text in enumerate(original)]
+        messages = self._deepseek_messages(payload)
+        try:
+            raw = self._call_deepseek(messages)
+            parsed = self._parse_json_array(raw)
+            return self._validated_texts(parsed, original)
+        except Exception as exc:
+            logger.warning("DeepSeek ASR post-process failed: %s", exc)
+            return original
+
+    def _call_deepseek(self, messages: list[dict[str, str]]) -> str:
+        body = {
+            "model": config.DEEPSEEK_MODEL,
+            "messages": messages,
+            "stream": False,
+            "temperature": config.DEEPSEEK_TEMPERATURE,
+            "max_tokens": config.DEEPSEEK_MAX_TOKENS,
+            "response_format": {"type": "json_object"},
+            "thinking": {"type": config.DEEPSEEK_THINKING},
+        }
+        request = urllib.request.Request(
+            f"{config.DEEPSEEK_BASE_URL}/chat/completions",
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=config.DEEPSEEK_TIMEOUT_SECONDS) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"DeepSeek HTTP {exc.code}: {detail}") from exc
+
+        choices = result.get("choices") if isinstance(result, dict) else None
+        if not choices:
+            raise RuntimeError("DeepSeek response missing choices")
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("DeepSeek response missing content")
+        return content.strip()
+
     @staticmethod
     def _original_texts(segments: list[dict[str, Any]]) -> list[str]:
         return [str(segment.get("text", "")) for segment in segments]
 
     def _ensure_model(self) -> bool:
+        if self.provider == "deepseek":
+            return self._ensure_deepseek()
         if self._loaded:
             return self._available
         with self._lock:
@@ -161,6 +215,20 @@ class TranscriptPostProcessor:
                 self._available = False
             finally:
                 self._loaded = True
+        return self._available
+
+    def _ensure_deepseek(self) -> bool:
+        if self._loaded:
+            return self._available
+        with self._lock:
+            if self._loaded:
+                return self._available
+            self._available = bool(config.DEEPSEEK_API_KEY)
+            self._loaded = True
+            if self._available:
+                logger.info("DeepSeek ASR post-process provider is ready: %s", config.DEEPSEEK_MODEL)
+            else:
+                logger.warning("DeepSeek ASR post-process provider selected but DEEPSEEK_API_KEY is not configured")
         return self._available
 
     def _resolve_model_path(self) -> str:
@@ -309,6 +377,26 @@ class TranscriptPostProcessor:
         if current:
             batches.append(current)
         return batches
+
+    @staticmethod
+    def _deepseek_messages(payload: list[dict[str, Any]]) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "你是中文会议语音转写校对器。只修正明确的 ASR 错字、同音误识别、领域术语和少量标点。"
+                    "不要总结、不要扩写、不要删减事实、不要改变原意；没有把握就保留原文。"
+                    "必须保留输入分段数量和 id，必须逐段返回。不要修改数字、时间、人名、单位名和专有名词，"
+                    "除非上下文和术语表提供明确依据。优先参考以下会议领域术语："
+                    f"{config.ASR_HOTWORDS}。"
+                    '只输出 JSON 对象，格式为 {"items":[{"id":0,"text":"修正后的文本"}]}。'
+                ),
+            },
+            {
+                "role": "user",
+                "content": "原始分段 JSON：\n" + json.dumps({"items": payload}, ensure_ascii=False),
+            },
+        ]
 
     @staticmethod
     def _messages(payload: list[dict[str, Any]]) -> list[dict[str, str]]:

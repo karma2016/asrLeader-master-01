@@ -140,6 +140,17 @@ POSTPROCESS_DEVICE = os.getenv("POSTPROCESS_DEVICE", os.getenv("ASR_DEVICE", "cp
 POSTPROCESS_MAX_CHARS = int(os.getenv("POSTPROCESS_MAX_CHARS", "1200"))
 POSTPROCESS_MAX_NEW_TOKENS = int(os.getenv("POSTPROCESS_MAX_NEW_TOKENS", "512"))
 POSTPROCESS_WORKERS = max(1, int(os.getenv("POSTPROCESS_WORKERS", "1")))
+POSTPROCESS_PROVIDER = os.getenv("POSTPROCESS_PROVIDER", "local").strip().lower() or "local"
 POSTPROCESS_SYNC_MAX_CHARS = int(os.getenv("POSTPROCESS_SYNC_MAX_CHARS", "1200"))
 POSTPROCESS_SYNC_TIMEOUT_SECONDS = int(os.getenv("POSTPROCESS_SYNC_TIMEOUT_SECONDS", "120"))
 CORRECTION_TASK_WORKERS = max(1, int(os.getenv("CORRECTION_TASK_WORKERS", "1")))
+
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip() or "deepseek-v4-flash"
+DEEPSEEK_TIMEOUT_SECONDS = int(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "120"))
+DEEPSEEK_MAX_TOKENS = int(os.getenv("DEEPSEEK_MAX_TOKENS", str(POSTPROCESS_MAX_NEW_TOKENS)))
+DEEPSEEK_TEMPERATURE = float(os.getenv("DEEPSEEK_TEMPERATURE", "0"))
+DEEPSEEK_THINKING = os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower()
+if DEEPSEEK_THINKING not in {"enabled", "disabled"}:
+    DEEPSEEK_THINKING = "disabled"
