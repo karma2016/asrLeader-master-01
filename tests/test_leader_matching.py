@@ -267,6 +267,62 @@ class LeaderMatchingTests(unittest.TestCase):
             )
         )
 
+    def test_rescue_candidates_prioritize_suspect_terms(self) -> None:
+        segments = [
+            {"speaker": "0", "start_time": 0.0, "end_time": 2.0, "text": "正常文本"},
+            {"speaker": "0", "start_time": 3.0, "end_time": 5.0, "text": "非国产机的是候可以的"},
+        ]
+
+        candidates = FunASRService._rescue_candidates(segments)
+
+        self.assertEqual(1, candidates[0][0])
+        self.assertIn("suspect_terms", candidates[0][1])
+
+    def test_rescue_replacement_accepts_reduced_bad_terms(self) -> None:
+        self.assertTrue(
+            FunASRService._accept_rescue_text(
+                "非国产机的是候可以的",
+                "非国产机的时候可以的",
+                2.0,
+            )
+        )
+
+    def test_rescue_replacement_rejects_digit_changes(self) -> None:
+        self.assertFalse(
+            FunASRService._accept_rescue_text(
+                "每天调用50次",
+                "每天调用80次",
+                2.0,
+            )
+        )
+
+    def test_rescue_replacement_rejects_padding_drift(self) -> None:
+        self.assertFalse(
+            FunASRService._accept_rescue_text(
+                "主子分号了吧。",
+                "朱朱子芬号上吧，然后后面又多识别了一大段。",
+                1.2,
+            )
+        )
+
+    def test_rescue_replacement_rejects_negation_changes(self) -> None:
+        self.assertFalse(
+            FunASRService._accept_rescue_text(
+                "否则谁都可以调一个问题",
+                "否则谁都不可以调一个问题",
+                2.0,
+            )
+        )
+
+    def test_rescue_replacement_rejects_remaining_suspect_terms(self) -> None:
+        self.assertFalse(
+            FunASRService._accept_rescue_text(
+                "他要我天天找我要那个真能体压衣啊",
+                "他要我天天找我要那个智能体压计啊",
+                4.0,
+            )
+        )
+
     def test_contextual_fallback_normalizes_domain_terms(self) -> None:
         text = "随身办的智智能体接入下量库，孙小猪会讲骂死和pass。"
 
@@ -351,13 +407,16 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertIn("通过随申办登录", fixed)
 
     def test_text_normalizer_repairs_llm_meeting_specific_regressions(self) -> None:
-        text = "主子分好了吧。这个只是主子的。但是分中心除外，分中心范围是配齐的。"
+        text = "主子分好了吧。主子分号了吧。这个只是主子的。但是分中心除外，分中心范围是配齐的。掉一个问题。整个车试。真能体。真能家。"
 
         fixed = normalize_asr_text(text)
 
         self.assertIn("主旨分好了", fixed)
         self.assertIn("只是主旨的", fixed)
         self.assertIn("四分中心除外，四分中心范围", fixed)
+        self.assertIn("调一个问题", fixed)
+        self.assertIn("整个测试", fixed)
+        self.assertIn("智能体", fixed)
 
 
 if __name__ == "__main__":

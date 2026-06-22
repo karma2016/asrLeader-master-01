@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import uuid
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,57 @@ from text_normalizer import normalize_asr_text
 
 
 logger = logging.getLogger(__name__)
+
+
+RESCUE_SUSPECT_TERMS = (
+    "生好喝",
+    "主子分号",
+    "主子分好",
+    "虚洗",
+    "酷写",
+    "是候",
+    "空制",
+    "知士",
+    "口口文档",
+    "真能体",
+    "压衣",
+    "压计",
+    "掉一个问题",
+    "钓鱼",
+    "身体现",
+    "调接",
+    "开通器",
+    "下量",
+    "搅和",
+    "生小猪",
+    "芝士",
+    "朱朱",
+    "压机",
+    "平家",
+    "车试",
+    "酷写",
+    "学写",
+)
+
+RESCUE_DOMAIN_TERMS = (
+    "随申办",
+    "协同办公",
+    "组织架构树",
+    "申小助",
+    "共性知识库",
+    "共性能力",
+    "共性智能体",
+    "公文校核",
+    "向量库",
+    "向量化",
+    "智能体",
+    "接口",
+    "调用",
+    "key",
+    "OA",
+    "WPS",
+    "ETL",
+)
 
 
 def detect_device() -> str:
@@ -132,6 +185,65 @@ class FunASRService:
 
         return self._refine_speaker_labels(audio_path, segments, num_speakers)
 
+    def rescue_segments(
+        self,
+        audio_path: str,
+        segments: list[dict[str, Any]],
+        hotwords: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        summary: dict[str, Any] = {
+            "enabled": config.ASR_RESCUE_ENABLED,
+            "candidates": 0,
+            "changed_segments": 0,
+            "rejected_segments": 0,
+            "total_audio_seconds": 0.0,
+            "max_segments": config.ASR_RESCUE_MAX_SEGMENTS,
+        }
+        if not config.ASR_RESCUE_ENABLED or not segments:
+            return segments, summary
+
+        self._ensure_loaded()
+        rescued = [dict(segment) for segment in segments]
+        candidates = self._rescue_candidates(rescued)
+        summary["candidates"] = len(candidates)
+        selected_hotwords = config.ASR_HOTWORDS if hotwords is None else hotwords.strip()
+
+        for index, reason in candidates:
+            segment = rescued[index]
+            duration = max(0.0, float(segment["end_time"]) - float(segment["start_time"]))
+            if summary["total_audio_seconds"] + duration > config.ASR_RESCUE_MAX_TOTAL_AUDIO_SECONDS:
+                break
+            summary["total_audio_seconds"] = round(summary["total_audio_seconds"] + duration, 2)
+            clip_path = self._extract_rescue_clip(audio_path, segment["start_time"], segment["end_time"])
+            try:
+                candidate = self._recognize_rescue_clip(clip_path, selected_hotwords)
+            except Exception as exc:
+                logger.warning(
+                    "Rescue ASR failed for segment %.2f-%.2f: %s",
+                    segment["start_time"],
+                    segment["end_time"],
+                    exc,
+                )
+                summary["rejected_segments"] += 1
+                continue
+            finally:
+                try:
+                    os.remove(clip_path)
+                except OSError:
+                    pass
+
+            original = str(segment.get("text", ""))
+            if self._accept_rescue_text(original, candidate, duration):
+                segment.setdefault("raw_text", original)
+                segment["text"] = candidate
+                segment["asr_rescued"] = True
+                segment["asr_rescue_reason"] = reason
+                summary["changed_segments"] += 1
+            else:
+                summary["rejected_segments"] += 1
+
+        return rescued, summary
+
     @staticmethod
     def transcript_quality(
         segments: list[dict[str, Any]],
@@ -225,6 +337,113 @@ class FunASRService:
             and dominant_ratio >= config.ASR_RETRY_DOMINANT_SPEAKER_RATIO
             and speaker_count <= config.ASR_QUALITY_MIN_EXPECTED_SPEAKERS
         )
+
+    @staticmethod
+    def _rescue_candidates(segments: list[dict[str, Any]]) -> list[tuple[int, str]]:
+        candidates: list[tuple[int, int, str]] = []
+        for index, segment in enumerate(segments):
+            duration = max(0.0, float(segment["end_time"]) - float(segment["start_time"]))
+            if (
+                duration < config.ASR_RESCUE_MIN_SEGMENT_SECONDS
+                or duration > config.ASR_RESCUE_MAX_SEGMENT_SECONDS
+            ):
+                continue
+
+            text = str(segment.get("text", ""))
+            reasons: list[str] = []
+            priority = 0
+            bad_count = FunASRService._rescue_bad_count(text)
+            if bad_count:
+                reasons.append("suspect_terms")
+                priority += 100 + bad_count * 10
+            if FunASRService._content_chars(text) / max(duration, 0.001) < config.ASR_RESCUE_MIN_TEXT_CHARS_PER_SECOND:
+                reasons.append("low_text_density")
+                priority += 50
+            if duration >= config.ASR_RESCUE_LONG_SEGMENT_SECONDS:
+                reasons.append("long_segment")
+                priority += 10
+
+            if reasons:
+                candidates.append((priority, index, ",".join(reasons)))
+
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        return [(index, reason) for _, index, reason in candidates[: max(0, config.ASR_RESCUE_MAX_SEGMENTS)]]
+
+    def _recognize_rescue_clip(self, clip_path: str, hotwords: str | None) -> str:
+        self._ensure_loaded()
+        kwargs: dict[str, Any] = {
+            "input": clip_path,
+            "batch_size_s": config.ASR_RESCUE_BATCH_SIZE_S,
+        }
+        if hotwords:
+            kwargs["hotword"] = hotwords
+        if config.ASR_RESCUE_PRESET_SPEAKER_NUM > 0:
+            kwargs["preset_spk_num"] = config.ASR_RESCUE_PRESET_SPEAKER_NUM
+
+        raw_results = self.model.generate(**kwargs)
+        texts: list[str] = []
+        for result in raw_results or []:
+            sentence_info = result.get("sentence_info") or []
+            if sentence_info:
+                texts.extend(str(item.get("text", "")) for item in sentence_info)
+            else:
+                texts.append(str(result.get("text", "")))
+        return normalize_asr_text("".join(texts).strip())
+
+    @staticmethod
+    def _accept_rescue_text(original: str, candidate: str, duration: float) -> bool:
+        original = original.strip()
+        candidate = candidate.strip()
+        if not original or not candidate or original == candidate:
+            return False
+        if re.findall(r"\d+(?:\.\d+)?", original) != re.findall(r"\d+(?:\.\d+)?", candidate):
+            return False
+        if FunASRService._negation_count(original) != FunASRService._negation_count(candidate):
+            return False
+
+        original_chars = FunASRService._content_chars(original)
+        candidate_chars = FunASRService._content_chars(candidate)
+        minimum_length = max(1, int(len(original) * 0.70))
+        maximum_length = max(len(original) + 24, int(len(original) * 1.35))
+        if not minimum_length <= len(candidate) <= maximum_length:
+            return False
+        if SequenceMatcher(None, original, candidate).ratio() < config.ASR_RESCUE_MIN_SIMILARITY:
+            return False
+
+        original_bad = FunASRService._rescue_bad_count(original)
+        candidate_bad = FunASRService._rescue_bad_count(candidate)
+        if candidate_bad > 0 or candidate_bad > original_bad:
+            return False
+        if candidate_bad < original_bad:
+            return True
+        if FunASRService._domain_term_count(candidate) > FunASRService._domain_term_count(original):
+            return True
+        if (
+            original_chars / max(duration, 0.001) < config.ASR_RESCUE_MIN_TEXT_CHARS_PER_SECOND
+            and candidate_chars >= original_chars + 2
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _rescue_bad_count(text: str) -> int:
+        return sum(text.count(term) for term in RESCUE_SUSPECT_TERMS)
+
+    @staticmethod
+    def _domain_term_count(text: str) -> int:
+        lower = text.lower()
+        total = 0
+        for term in RESCUE_DOMAIN_TERMS:
+            total += lower.count(term.lower()) if term.isascii() else text.count(term)
+        return total
+
+    @staticmethod
+    def _content_chars(text: str) -> int:
+        return sum(1 for char in text if not char.isspace() and char not in "，。？！、,.!?；;：:")
+
+    @staticmethod
+    def _negation_count(text: str) -> int:
+        return sum(text.count(term) for term in ("不", "没", "无", "否"))
 
     def extract_voiceprint(self, audio_path: str) -> list[float]:
         self._ensure_loaded()
@@ -445,6 +664,34 @@ class FunASRService:
     def _mark_leader(self, segment: dict[str, Any], match: dict[str, Any]) -> None:
         segment["is_leader"] = True
         segment["leader_id"] = match["leader_id"]
+
+    def _extract_rescue_clip(self, audio_path: str, start: float, end: float) -> str:
+        padding = max(0.0, config.ASR_RESCUE_PADDING_MS / 1000.0)
+        clip_start = max(0.0, start - padding)
+        duration = max(0.2, end - start + padding * 2)
+        out_path = str(Path(tempfile.gettempdir()) / f"asr_rescue_{uuid.uuid4().hex}.wav")
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            str(clip_start),
+            "-t",
+            str(duration),
+            "-i",
+            audio_path,
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+        ]
+        if config.ASR_RESCUE_AUDIO_FILTER:
+            cmd.extend(["-af", config.ASR_RESCUE_AUDIO_FILTER])
+        cmd.append(out_path)
+        subprocess.run(cmd, check=True)
+        return out_path
 
     @staticmethod
     def _merge_matched_leader_speakers(

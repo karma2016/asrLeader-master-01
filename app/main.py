@@ -390,6 +390,17 @@ async def health():
         },
         "auto_retry_bad_diarization": config.ASR_AUTO_RETRY_BAD_DIARIZATION,
         "fallback_speaker_num": config.ASR_FALLBACK_SPEAKER_NUM,
+        "rescue_asr": {
+            "enabled": config.ASR_RESCUE_ENABLED,
+            "max_segments": config.ASR_RESCUE_MAX_SEGMENTS,
+            "max_total_audio_seconds": config.ASR_RESCUE_MAX_TOTAL_AUDIO_SECONDS,
+            "max_segment_seconds": config.ASR_RESCUE_MAX_SEGMENT_SECONDS,
+            "min_text_chars_per_second": config.ASR_RESCUE_MIN_TEXT_CHARS_PER_SECOND,
+            "long_segment_seconds": config.ASR_RESCUE_LONG_SEGMENT_SECONDS,
+            "padding_ms": config.ASR_RESCUE_PADDING_MS,
+            "preset_speaker_num": config.ASR_RESCUE_PRESET_SPEAKER_NUM,
+            "min_similarity": config.ASR_RESCUE_MIN_SIMILARITY,
+        },
     }
 
 
@@ -461,6 +472,15 @@ async def transcribe(
                 "fallback_speaker_num": fallback_speakers,
                 "initial_quality": initial_quality,
             }
+        if config.ASR_RESCUE_ENABLED:
+            result, rescue_summary = await loop.run_in_executor(
+                executor,
+                asr_service.rescue_segments,
+                path,
+                result,
+                hotwords,
+            )
+            asr_quality["rescue"] = rescue_summary
         if asr_quality["status"] != "ok":
             logger.warning("ASR quality warnings: %s", asr_quality)
         should_correct_text = post_process if correct_text is None else correct_text
