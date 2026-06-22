@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import config
+from text_normalizer import normalize_asr_text
 
 
 logger = logging.getLogger(__name__)
@@ -246,6 +247,7 @@ class TranscriptPostProcessor:
 
     @staticmethod
     def _contextual_fallback(text: str, full_text: str) -> str:
+        return normalize_asr_text(text, full_text)
         del full_text
         replacements = {
             "随身办": "随申办",

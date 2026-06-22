@@ -17,6 +17,7 @@ from funasr import AutoModel
 
 import config
 from leader_store import LeaderStore, cosine_similarity
+from text_normalizer import normalize_asr_text
 
 
 logger = logging.getLogger(__name__)
@@ -114,16 +115,20 @@ class FunASRService:
             for item in result.get("sentence_info", []):
                 start = round(float(item.get("start", 0)) / 1000.0, 3)
                 end = round(float(item.get("end", 0)) / 1000.0, 3)
-                segments.append(
-                    {
-                        "speaker": str(item.get("spk", 0)),
-                        "start_time": round(start, 2),
-                        "end_time": round(end, 2),
-                        "text": item.get("text", ""),
-                        "is_leader": False,
-                        "leader_id": None,
-                    }
-                )
+                raw_text = str(item.get("text", ""))
+                text = normalize_asr_text(raw_text)
+                segment = {
+                    "speaker": str(item.get("spk", 0)),
+                    "start_time": round(start, 2),
+                    "end_time": round(end, 2),
+                    "text": text,
+                    "is_leader": False,
+                    "leader_id": None,
+                }
+                if text != raw_text:
+                    segment["raw_text"] = raw_text
+                    segment["rule_normalized"] = True
+                segments.append(segment)
 
         return self._refine_speaker_labels(audio_path, segments, num_speakers)
 
@@ -196,6 +201,30 @@ class FunASRService:
             },
             "speaker_segments": dict(sorted(speaker_segments.items())),
         }
+
+    @staticmethod
+    def should_retry_diarization(
+        quality: dict[str, Any],
+        requested_speakers: int | None,
+        audio_duration: float | None,
+    ) -> bool:
+        if requested_speakers or not config.ASR_AUTO_RETRY_BAD_DIARIZATION:
+            return False
+        if config.ASR_FALLBACK_SPEAKER_NUM <= 0:
+            return False
+        if audio_duration is None or audio_duration < config.ASR_RETRY_MIN_AUDIO_SECONDS:
+            return False
+        warnings = set(quality.get("warnings") or [])
+        max_segment = float(quality.get("max_segment_seconds") or 0.0)
+        dominant_ratio = float(quality.get("dominant_speaker_ratio") or 0.0)
+        speaker_count = int(quality.get("speaker_count") or 0)
+        if "segment_too_long" in warnings and max_segment >= config.ASR_RETRY_MAX_SEGMENT_SECONDS:
+            return True
+        return (
+            "dominant_speaker_too_large" in warnings
+            and dominant_ratio >= config.ASR_RETRY_DOMINANT_SPEAKER_RATIO
+            and speaker_count <= config.ASR_QUALITY_MIN_EXPECTED_SPEAKERS
+        )
 
     def extract_voiceprint(self, audio_path: str) -> list[float]:
         self._ensure_loaded()
@@ -742,10 +771,14 @@ class FunASRService:
                 and FunASRService._leader_id(merged[-1]) == FunASRService._leader_id(segment)
                 and gap <= config.SEGMENT_MERGE_MAX_GAP_SECONDS
             ):
-                merged[-1]["text"] = FunASRService._join_segment_text(
-                    merged[-1].get("text", ""),
-                    segment.get("text", ""),
-                )
+                left_text = merged[-1].get("text", "")
+                right_text = segment.get("text", "")
+                left_raw = merged[-1].get("raw_text", left_text)
+                right_raw = segment.get("raw_text", right_text)
+                merged[-1]["text"] = FunASRService._join_segment_text(left_text, right_text)
+                if merged[-1].get("rule_normalized") or segment.get("rule_normalized"):
+                    merged[-1]["rule_normalized"] = True
+                    merged[-1]["raw_text"] = FunASRService._join_segment_text(left_raw, right_raw)
                 merged[-1]["end_time"] = max(merged[-1]["end_time"], segment["end_time"])
                 merged[-1]["is_leader"] = merged[-1].get("is_leader", False) or segment.get("is_leader", False)
                 if segment.get("leader_id"):

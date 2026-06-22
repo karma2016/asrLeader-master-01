@@ -10,6 +10,7 @@ sys.modules.setdefault("funasr", SimpleNamespace(AutoModel=object))
 import config
 from model_service import FunASRService
 from post_processor import TranscriptPostProcessor
+from text_normalizer import normalize_asr_text, repair_mojibake
 
 
 def candidate(
@@ -161,6 +162,33 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertEqual(segments[0]["speaker"], segments[3]["speaker"])
         self.assertNotEqual(segments[0]["speaker"], segments[1]["speaker"])
 
+    def test_merge_adjacent_segments_preserves_rule_normalized_raw_text(self) -> None:
+        segments = [
+            {
+                "speaker": "0",
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": "协同办公",
+                "raw_text": "协动办公",
+                "rule_normalized": True,
+                "leader_id": None,
+            },
+            {
+                "speaker": "0",
+                "start_time": 1.2,
+                "end_time": 2.0,
+                "text": "可以接入。",
+                "leader_id": None,
+            },
+        ]
+
+        merged = FunASRService._merge_adjacent_segments(segments)
+
+        self.assertEqual(1, len(merged))
+        self.assertTrue(merged[0]["rule_normalized"])
+        self.assertEqual("协动办公可以接入。", merged[0]["raw_text"])
+        self.assertEqual("协同办公可以接入。", merged[0]["text"])
+
     def test_transcript_quality_flags_long_mixed_speaker_segments(self) -> None:
         segments = [
             {"speaker": "0", "start_time": 0.0, "end_time": 1545.0},
@@ -200,6 +228,45 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertEqual([], quality["warnings"])
         self.assertEqual(3, quality["speaker_count"])
 
+    def test_bad_diarization_quality_triggers_auto_retry(self) -> None:
+        quality = {
+            "warnings": ["segment_too_long", "dominant_speaker_too_large"],
+            "max_segment_seconds": 353.28,
+            "dominant_speaker_ratio": 0.8657,
+            "speaker_count": 2,
+        }
+
+        with (
+            patch.object(config, "ASR_AUTO_RETRY_BAD_DIARIZATION", True),
+            patch.object(config, "ASR_FALLBACK_SPEAKER_NUM", 6),
+            patch.object(config, "ASR_RETRY_MIN_AUDIO_SECONDS", 300.0),
+            patch.object(config, "ASR_RETRY_MAX_SEGMENT_SECONDS", 180.0),
+            patch.object(config, "ASR_RETRY_DOMINANT_SPEAKER_RATIO", 0.80),
+        ):
+            should_retry = FunASRService.should_retry_diarization(
+                quality,
+                requested_speakers=None,
+                audio_duration=2114.72,
+            )
+
+        self.assertTrue(should_retry)
+
+    def test_requested_speaker_count_disables_auto_retry(self) -> None:
+        quality = {
+            "warnings": ["segment_too_long", "dominant_speaker_too_large"],
+            "max_segment_seconds": 353.28,
+            "dominant_speaker_ratio": 0.8657,
+            "speaker_count": 2,
+        }
+
+        self.assertFalse(
+            FunASRService.should_retry_diarization(
+                quality,
+                requested_speakers=6,
+                audio_duration=2114.72,
+            )
+        )
+
     def test_contextual_fallback_normalizes_domain_terms(self) -> None:
         text = "随身办的智智能体接入下量库，孙小猪会讲骂死和pass。"
 
@@ -211,6 +278,33 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertIn("申小助", fixed)
         self.assertIn("MaaS", fixed)
         self.assertIn("PaaS", fixed)
+
+    def test_text_normalizer_repairs_mojibake_response_text(self) -> None:
+        text = "灏变細鏈夋潈闄愩€傛潈闄愯繖鍧楀憿"
+
+        fixed = repair_mojibake(text)
+
+        self.assertIn("就会有权限", fixed)
+        self.assertIn("权限这块呢", fixed)
+
+    def test_text_normalizer_normalizes_latest_domain_errors(self) -> None:
+        text = (
+            "系动办公和协动办公里统一组织架构数要接入生小猪，"
+            "公共公共知识库可以通过接口申请 k，能力开给他以后就能做搅合，"
+            "否则每次掉接口要我 KK 是不是，还要控制几点直接钓鱼。"
+        )
+
+        fixed = normalize_asr_text(text)
+
+        self.assertIn("协同办公", fixed)
+        self.assertIn("统一组织架构树", fixed)
+        self.assertIn("申小助", fixed)
+        self.assertIn("共性知识库", fixed)
+        self.assertIn("申请 key", fixed)
+        self.assertIn("做校核", fixed)
+        self.assertIn("调接口", fixed)
+        self.assertIn("key 是不是", fixed)
+        self.assertIn("直接调用", fixed)
 
 
 if __name__ == "__main__":

@@ -381,6 +381,8 @@ async def health():
             "min_expected_speakers": config.ASR_QUALITY_MIN_EXPECTED_SPEAKERS,
             "min_segments_per_hour": config.ASR_QUALITY_MIN_SEGMENTS_PER_HOUR,
         },
+        "auto_retry_bad_diarization": config.ASR_AUTO_RETRY_BAD_DIARIZATION,
+        "fallback_speaker_num": config.ASR_FALLBACK_SPEAKER_NUM,
     }
 
 
@@ -400,6 +402,7 @@ async def transcribe(
     path = await save_upload(file, "asr")
     try:
         loop = asyncio.get_event_loop()
+        audio_duration = audio_duration_seconds(path)
         result = await loop.run_in_executor(
             executor,
             asr_service.transcribe,
@@ -418,7 +421,39 @@ async def transcribe(
                 return_leader_scores,
             )
         result = asr_service._merge_adjacent_segments(result)
-        asr_quality = asr_service.transcript_quality(result, audio_duration_seconds(path))
+        asr_quality = asr_service.transcript_quality(result, audio_duration)
+        if asr_service.should_retry_diarization(asr_quality, num_speakers, audio_duration):
+            initial_quality = asr_quality
+            fallback_speakers = config.ASR_FALLBACK_SPEAKER_NUM
+            logger.warning(
+                "Retrying ASR with fallback speaker count %s after diarization warning: %s",
+                fallback_speakers,
+                initial_quality,
+            )
+            result = await loop.run_in_executor(
+                executor,
+                asr_service.transcribe,
+                path,
+                fallback_speakers,
+                hotwords,
+            )
+            if identify_leaders:
+                result = await loop.run_in_executor(
+                    executor,
+                    asr_service.annotate_leaders,
+                    path,
+                    result,
+                    leader_store,
+                    leader_threshold,
+                    return_leader_scores,
+                )
+            result = asr_service._merge_adjacent_segments(result)
+            asr_quality = asr_service.transcript_quality(result, audio_duration)
+            asr_quality["retry"] = {
+                "reason": "bad_diarization",
+                "fallback_speaker_num": fallback_speakers,
+                "initial_quality": initial_quality,
+            }
         if asr_quality["status"] != "ok":
             logger.warning("ASR quality warnings: %s", asr_quality)
         should_correct_text = post_process if correct_text is None else correct_text

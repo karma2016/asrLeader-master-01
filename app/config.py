@@ -72,6 +72,26 @@ DEFAULT_ASR_HOTWORDS = " ".join(
         "政务公开",
         "知识库",
         "数据库",
+        "统一用户",
+        "用户体系",
+        "组织架构",
+        "组织架构树",
+        "子树",
+        "协同办公",
+        "测试环境",
+        "生产环境",
+        "标杆场景",
+        "智能化场景",
+        "项目空间",
+        "委办局管理员",
+        "分中心",
+        "看板",
+        "下钻",
+        "接口",
+        "key",
+        "API",
+        "调用次数",
+        "开通系统",
     ]
 )
 ASR_HOTWORDS = os.getenv("ASR_HOTWORDS") or DEFAULT_ASR_HOTWORDS
@@ -79,6 +99,11 @@ ASR_QUALITY_MAX_SEGMENT_SECONDS = float(os.getenv("ASR_QUALITY_MAX_SEGMENT_SECON
 ASR_QUALITY_DOMINANT_SPEAKER_RATIO = float(os.getenv("ASR_QUALITY_DOMINANT_SPEAKER_RATIO", "0.70"))
 ASR_QUALITY_MIN_EXPECTED_SPEAKERS = int(os.getenv("ASR_QUALITY_MIN_EXPECTED_SPEAKERS", "2"))
 ASR_QUALITY_MIN_SEGMENTS_PER_HOUR = float(os.getenv("ASR_QUALITY_MIN_SEGMENTS_PER_HOUR", "60"))
+ASR_AUTO_RETRY_BAD_DIARIZATION = _bool_env("ASR_AUTO_RETRY_BAD_DIARIZATION", True)
+ASR_FALLBACK_SPEAKER_NUM = int(os.getenv("ASR_FALLBACK_SPEAKER_NUM", "6"))
+ASR_RETRY_MIN_AUDIO_SECONDS = float(os.getenv("ASR_RETRY_MIN_AUDIO_SECONDS", "300"))
+ASR_RETRY_MAX_SEGMENT_SECONDS = float(os.getenv("ASR_RETRY_MAX_SEGMENT_SECONDS", "180"))
+ASR_RETRY_DOMINANT_SPEAKER_RATIO = float(os.getenv("ASR_RETRY_DOMINANT_SPEAKER_RATIO", "0.80"))
 LEADER_DB_PATH = Path(os.getenv("LEADER_DB_PATH", str(DATA_DIR / "leaders.json")))
 LEADER_THRESHOLD = float(os.getenv("LEADER_THRESHOLD", "0.45"))
 LEADER_SPEAKER_THRESHOLD = float(os.getenv("LEADER_SPEAKER_THRESHOLD", "0.35"))
