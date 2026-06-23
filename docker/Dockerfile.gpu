@@ -9,6 +9,8 @@ RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+COPY scripts/install_qwen3_asr_rescue.sh ./scripts/install_qwen3_asr_rescue.sh
+RUN chmod +x ./scripts/install_qwen3_asr_rescue.sh
 
 ENV ASR_DEVICE=cuda:0
 ENV MODELS_DIR=/models

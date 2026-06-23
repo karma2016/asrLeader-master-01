@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -146,8 +147,11 @@ class FunASRService:
         self.device = detect_device()
         self.model: AutoModel | None = None
         self.rescue_model: Any = None
+        self.qwen_rescue_model: Any = None
         self._rescue_model_lock = threading.Lock()
+        self._qwen_rescue_model_lock = threading.Lock()
         self._rescue_model_failed = False
+        self._qwen_rescue_model_failed = False
 
     def load(self) -> None:
         logger.info("Loading FunASR models")
@@ -242,7 +246,7 @@ class FunASRService:
             "total_audio_seconds": 0.0,
             "max_segments": config.ASR_RESCUE_MAX_SEGMENTS,
             "provider": config.ASR_RESCUE_PROVIDER,
-            "model": config.ASR_RESCUE_MODEL if config.ASR_RESCUE_PROVIDER == "sensevoice" else None,
+            "model": self._rescue_provider_model_name(config.ASR_RESCUE_PROVIDER),
             "accepted_samples": [],
             "rejected_samples": [],
         }
@@ -264,7 +268,12 @@ class FunASRService:
             clip_path = self._extract_rescue_clip(audio_path, segment["start_time"], segment["end_time"])
             provider_used = config.ASR_RESCUE_PROVIDER
             try:
-                candidate, provider_used = self._recognize_rescue_clip(clip_path, selected_hotwords)
+                candidate, provider_used = self._recognize_rescue_clip(
+                    clip_path,
+                    selected_hotwords,
+                    reason,
+                    duration,
+                )
             except Exception as exc:
                 logger.warning(
                     "Rescue ASR failed for segment %.2f-%.2f: %s",
@@ -476,10 +485,43 @@ class FunASRService:
         candidates.sort(key=lambda item: (-item[0], item[1]))
         return [(index, reason) for _, index, reason in candidates[: max(0, config.ASR_RESCUE_MAX_SEGMENTS)]]
 
-    def _recognize_rescue_clip(self, clip_path: str, hotwords: str | None) -> tuple[str, str]:
+    @staticmethod
+    def _rescue_provider_model_name(provider: str) -> str | None:
+        if provider == "sensevoice":
+            return config.ASR_RESCUE_MODEL
+        if provider in {"qwen3", "qwen3-asr", "qwen3_asr"}:
+            return config.ASR_QWEN_RESCUE_MODEL
+        if provider in {"hybrid", "qwen3_sensevoice", "qwen3-sensevoice"}:
+            return f"qwen3:{config.ASR_QWEN_RESCUE_MODEL}; sensevoice:{config.ASR_RESCUE_MODEL}"
+        return None
+
+    def _recognize_rescue_clip(
+        self,
+        clip_path: str,
+        hotwords: str | None,
+        reason: str = "",
+        duration: float = 0.0,
+    ) -> tuple[str, str]:
         provider = config.ASR_RESCUE_PROVIDER
         if provider in {"off", "none", "disabled"}:
             return "", "off"
+        if provider in {"qwen3", "qwen3-asr", "qwen3_asr"}:
+            try:
+                return self._recognize_qwen3_rescue_clip(clip_path), "qwen3-asr"
+            except Exception as exc:
+                logger.warning("Qwen3 rescue ASR unavailable, falling back to FunASR: %s", exc)
+                return self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"
+        if provider in {"hybrid", "qwen3_sensevoice", "qwen3-sensevoice"}:
+            if self._should_use_qwen_rescue(reason, duration):
+                try:
+                    return self._recognize_qwen3_rescue_clip(clip_path), "qwen3-asr"
+                except Exception as exc:
+                    logger.warning("Qwen3 rescue ASR unavailable, falling back to SenseVoice/FunASR: %s", exc)
+            try:
+                return self._recognize_sensevoice_rescue_clip(clip_path), "sensevoice"
+            except Exception as exc:
+                logger.warning("SenseVoice rescue ASR unavailable, falling back to FunASR: %s", exc)
+                return self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"
         if provider == "sensevoice":
             try:
                 return self._recognize_sensevoice_rescue_clip(clip_path), "sensevoice"
@@ -487,6 +529,15 @@ class FunASRService:
                 logger.warning("SenseVoice rescue ASR unavailable, falling back to FunASR: %s", exc)
                 return self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"
         return self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"
+
+    @staticmethod
+    def _should_use_qwen_rescue(reason: str, duration: float) -> bool:
+        if duration < config.ASR_QWEN_RESCUE_MIN_SEGMENT_SECONDS:
+            return False
+        if not config.ASR_QWEN_RESCUE_REASON_FILTER:
+            return True
+        reasons = {item.strip() for item in reason.split(",") if item.strip()}
+        return bool(reasons & config.ASR_QWEN_RESCUE_REASON_FILTER)
 
     def _recognize_funasr_rescue_clip(self, clip_path: str, hotwords: str | None) -> str:
         self._ensure_loaded()
@@ -515,6 +566,18 @@ class FunASRService:
             kwargs["merge_length_s"] = config.ASR_RESCUE_MERGE_LENGTH_S
         raw_results = model.generate(**kwargs)
         return self._rescue_results_text(raw_results)
+
+    def _recognize_qwen3_rescue_clip(self, clip_path: str) -> str:
+        model = self._ensure_qwen_rescue_model()
+        results = model.transcribe(
+            audio=clip_path,
+            language=config.ASR_QWEN_RESCUE_LANGUAGE,
+            context=config.ASR_QWEN_RESCUE_CONTEXT,
+        )
+        if not results:
+            return ""
+        text = str(getattr(results[0], "text", "") or "").strip()
+        return normalize_asr_text(text)
 
     @staticmethod
     def _rescue_results_text(raw_results: Any) -> str:
@@ -554,6 +617,63 @@ class FunASRService:
             except Exception:
                 self._rescue_model_failed = True
                 raise
+
+    def _ensure_qwen_rescue_model(self) -> Any:
+        if self.qwen_rescue_model is not None:
+            return self.qwen_rescue_model
+        if self._qwen_rescue_model_failed:
+            raise RuntimeError("Qwen3 rescue model is unavailable")
+        with self._qwen_rescue_model_lock:
+            if self.qwen_rescue_model is not None:
+                return self.qwen_rescue_model
+            if self._qwen_rescue_model_failed:
+                raise RuntimeError("Qwen3 rescue model is unavailable")
+            try:
+                runtime_path = config.ASR_QWEN_RESCUE_RUNTIME_PATH
+                if runtime_path and Path(runtime_path).is_dir() and runtime_path not in sys.path:
+                    sys.path.insert(0, runtime_path)
+                import torch
+                from qwen_asr import Qwen3ASRModel
+
+                dtype = self._qwen_torch_dtype(torch)
+                device_map = config.ASR_QWEN_RESCUE_DEVICE_MAP or self._qwen_device_map()
+                logger.info(
+                    "Loading Qwen3 rescue ASR model: %s, device_map=%s, dtype=%s",
+                    config.ASR_QWEN_RESCUE_MODEL,
+                    device_map,
+                    config.ASR_QWEN_RESCUE_DTYPE,
+                )
+                self.qwen_rescue_model = Qwen3ASRModel.from_pretrained(
+                    config.ASR_QWEN_RESCUE_MODEL,
+                    dtype=dtype,
+                    device_map=device_map,
+                    max_inference_batch_size=config.ASR_QWEN_RESCUE_BATCH_SIZE,
+                    max_new_tokens=config.ASR_QWEN_RESCUE_MAX_NEW_TOKENS,
+                )
+                logger.info("Qwen3 rescue ASR model is ready: %s", config.ASR_QWEN_RESCUE_MODEL)
+                return self.qwen_rescue_model
+            except Exception:
+                self._qwen_rescue_model_failed = True
+                raise
+
+    @staticmethod
+    def _qwen_torch_dtype(torch_module: Any) -> Any:
+        mapping = {
+            "auto": "auto",
+            "float16": getattr(torch_module, "float16", None),
+            "fp16": getattr(torch_module, "float16", None),
+            "bfloat16": getattr(torch_module, "bfloat16", None),
+            "bf16": getattr(torch_module, "bfloat16", None),
+            "float32": getattr(torch_module, "float32", None),
+            "fp32": getattr(torch_module, "float32", None),
+        }
+        value = mapping.get(config.ASR_QWEN_RESCUE_DTYPE)
+        return value if value is not None else getattr(torch_module, "bfloat16", None)
+
+    def _qwen_device_map(self) -> str:
+        if str(self.device).startswith("cuda"):
+            return self.device
+        return "cpu"
 
     @staticmethod
     def _accept_rescue_text(original: str, candidate: str, duration: float) -> bool:

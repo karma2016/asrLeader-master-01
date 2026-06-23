@@ -123,6 +123,42 @@ ASR_RESCUE_MODEL = os.getenv("ASR_RESCUE_MODEL", "").strip()
 if not ASR_RESCUE_MODEL:
     local_rescue_model = MODELS_DIR / "SenseVoiceSmall"
     ASR_RESCUE_MODEL = str(local_rescue_model) if local_rescue_model.is_dir() else ASR_RESCUE_MODEL_ALIAS
+ASR_QWEN_RESCUE_MODEL_ALIAS = os.getenv("ASR_QWEN_RESCUE_MODEL_ALIAS", "Qwen/Qwen3-ASR-0.6B")
+ASR_QWEN_RESCUE_MODEL = os.getenv("ASR_QWEN_RESCUE_MODEL", "").strip()
+if not ASR_QWEN_RESCUE_MODEL:
+    local_qwen_model = MODELS_DIR / "Qwen3-ASR-0.6B"
+    data_qwen_model = DATA_DIR / "qwen3-asr-0.6b"
+    if local_qwen_model.is_dir():
+        ASR_QWEN_RESCUE_MODEL = str(local_qwen_model)
+    elif data_qwen_model.is_dir():
+        ASR_QWEN_RESCUE_MODEL = str(data_qwen_model)
+    else:
+        ASR_QWEN_RESCUE_MODEL = ASR_QWEN_RESCUE_MODEL_ALIAS
+ASR_QWEN_RESCUE_RUNTIME_PATH = os.getenv(
+    "ASR_QWEN_RESCUE_RUNTIME_PATH",
+    str(DATA_DIR / "qwen_asr_runtime"),
+).strip()
+ASR_QWEN_RESCUE_LANGUAGE = os.getenv("ASR_QWEN_RESCUE_LANGUAGE", "Chinese").strip() or "Chinese"
+ASR_QWEN_RESCUE_DTYPE = os.getenv("ASR_QWEN_RESCUE_DTYPE", "bfloat16").strip().lower() or "bfloat16"
+ASR_QWEN_RESCUE_DEVICE_MAP = os.getenv("ASR_QWEN_RESCUE_DEVICE_MAP", "").strip()
+ASR_QWEN_RESCUE_MAX_NEW_TOKENS = int(os.getenv("ASR_QWEN_RESCUE_MAX_NEW_TOKENS", "768"))
+ASR_QWEN_RESCUE_BATCH_SIZE = max(1, int(os.getenv("ASR_QWEN_RESCUE_BATCH_SIZE", "1")))
+ASR_QWEN_RESCUE_MIN_SEGMENT_SECONDS = float(os.getenv("ASR_QWEN_RESCUE_MIN_SEGMENT_SECONDS", "8.0"))
+ASR_QWEN_RESCUE_REASON_FILTER = {
+    item.strip()
+    for item in os.getenv(
+        "ASR_QWEN_RESCUE_REASON_FILTER",
+        "suspect_terms,noise_terms,low_text_density,long_segment",
+    ).split(",")
+    if item.strip()
+}
+DEFAULT_QWEN_RESCUE_CONTEXT = (
+    "会议领域词：随申办、申小助、协同办公、组织架构树、共性知识库、共性能力、"
+    "共性智能体、智能体、向量库、向量化、接口、调用、key、AKSK、MaaS、PaaS、"
+    "OA、WPS、公文校核、委办局、开发商、厂商、项目空间、智能化场景、tab页、平铺。"
+    "请按音频逐字转写，不要总结，不要润色。"
+)
+ASR_QWEN_RESCUE_CONTEXT = os.getenv("ASR_QWEN_RESCUE_CONTEXT", "").strip() or DEFAULT_QWEN_RESCUE_CONTEXT
 ASR_RESCUE_LANGUAGE = os.getenv("ASR_RESCUE_LANGUAGE", "zh").strip() or "zh"
 ASR_RESCUE_USE_ITN = _bool_env("ASR_RESCUE_USE_ITN", True)
 ASR_RESCUE_MERGE_VAD = _bool_env("ASR_RESCUE_MERGE_VAD", True)

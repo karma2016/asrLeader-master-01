@@ -402,9 +402,16 @@ async def health():
             "min_similarity": config.ASR_RESCUE_MIN_SIMILARITY,
             "noise_min_similarity": config.ASR_RESCUE_NOISE_MIN_SIMILARITY,
             "provider": config.ASR_RESCUE_PROVIDER,
-            "model": config.ASR_RESCUE_MODEL if config.ASR_RESCUE_PROVIDER == "sensevoice" else None,
+            "model": asr_service._rescue_provider_model_name(config.ASR_RESCUE_PROVIDER),
             "language": config.ASR_RESCUE_LANGUAGE,
             "audit_samples": config.ASR_RESCUE_AUDIT_SAMPLES,
+            "qwen": {
+                "model": config.ASR_QWEN_RESCUE_MODEL,
+                "runtime_path": config.ASR_QWEN_RESCUE_RUNTIME_PATH,
+                "language": config.ASR_QWEN_RESCUE_LANGUAGE,
+                "min_segment_seconds": config.ASR_QWEN_RESCUE_MIN_SEGMENT_SECONDS,
+                "reason_filter": sorted(config.ASR_QWEN_RESCUE_REASON_FILTER),
+            },
         },
     }
 

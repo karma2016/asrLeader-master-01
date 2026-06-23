@@ -434,6 +434,62 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertEqual("fallback text", text)
         self.assertEqual("funasr", provider)
 
+    def test_qwen_rescue_provider_falls_back_to_funasr(self) -> None:
+        service = FunASRService.__new__(FunASRService)
+        with (
+            patch.object(config, "ASR_RESCUE_PROVIDER", "qwen3"),
+            patch.object(
+                FunASRService,
+                "_recognize_qwen3_rescue_clip",
+                side_effect=RuntimeError("missing qwen"),
+            ),
+            patch.object(FunASRService, "_recognize_funasr_rescue_clip", return_value="fallback text"),
+        ):
+            text, provider = service._recognize_rescue_clip("clip.wav", "", "long_segment", 20.0)
+
+        self.assertEqual("fallback text", text)
+        self.assertEqual("funasr", provider)
+
+    def test_hybrid_rescue_uses_qwen_for_selected_long_segments(self) -> None:
+        service = FunASRService.__new__(FunASRService)
+        with (
+            patch.object(config, "ASR_RESCUE_PROVIDER", "hybrid"),
+            patch.object(config, "ASR_QWEN_RESCUE_MIN_SEGMENT_SECONDS", 8.0),
+            patch.object(config, "ASR_QWEN_RESCUE_REASON_FILTER", {"long_segment"}),
+            patch.object(FunASRService, "_recognize_qwen3_rescue_clip", return_value="qwen text"),
+            patch.object(FunASRService, "_recognize_sensevoice_rescue_clip", return_value="sensevoice text"),
+        ):
+            text, provider = service._recognize_rescue_clip("clip.wav", "", "long_segment", 20.0)
+
+        self.assertEqual("qwen text", text)
+        self.assertEqual("qwen3-asr", provider)
+
+    def test_hybrid_rescue_uses_sensevoice_for_unselected_short_segments(self) -> None:
+        service = FunASRService.__new__(FunASRService)
+        with (
+            patch.object(config, "ASR_RESCUE_PROVIDER", "hybrid"),
+            patch.object(config, "ASR_QWEN_RESCUE_MIN_SEGMENT_SECONDS", 8.0),
+            patch.object(config, "ASR_QWEN_RESCUE_REASON_FILTER", {"long_segment"}),
+            patch.object(FunASRService, "_recognize_qwen3_rescue_clip", return_value="qwen text") as qwen_call,
+            patch.object(FunASRService, "_recognize_sensevoice_rescue_clip", return_value="sensevoice text"),
+        ):
+            text, provider = service._recognize_rescue_clip("clip.wav", "", "noise_terms", 3.0)
+
+        qwen_call.assert_not_called()
+        self.assertEqual("sensevoice text", text)
+        self.assertEqual("sensevoice", provider)
+
+    def test_rescue_provider_model_name_reports_qwen_and_hybrid(self) -> None:
+        with (
+            patch.object(config, "ASR_QWEN_RESCUE_MODEL", "qwen-model"),
+            patch.object(config, "ASR_RESCUE_MODEL", "sensevoice-model"),
+        ):
+            self.assertEqual("qwen-model", FunASRService._rescue_provider_model_name("qwen3"))
+            self.assertEqual(
+                "qwen3:qwen-model; sensevoice:sensevoice-model",
+                FunASRService._rescue_provider_model_name("hybrid"),
+            )
+
     def test_contextual_fallback_normalizes_domain_terms(self) -> None:
         text = "随身办的智智能体接入下量库，孙小猪会讲骂死和pass。"
 
