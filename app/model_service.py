@@ -1007,7 +1007,7 @@ class FunASRService:
                 except OSError:
                     pass
 
-        aliases = {speaker: speaker for speaker in groups}
+        aliases = {str(segment["speaker"]): str(segment["speaker"]) for segment in segments}
         if target_count and target_count > 0:
             while len({self._speaker_root(aliases, speaker) for speaker in groups}) > target_count:
                 pair = self._most_similar_active_speakers(profiles, aliases)
@@ -1144,7 +1144,9 @@ class FunASRService:
 
     @staticmethod
     def _speaker_root(aliases: dict[str, str], speaker: str) -> str:
+        aliases.setdefault(speaker, speaker)
         while aliases[speaker] != speaker:
+            aliases.setdefault(aliases[speaker], aliases[speaker])
             aliases[speaker] = aliases[aliases[speaker]]
             speaker = aliases[speaker]
         return speaker

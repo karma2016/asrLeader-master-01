@@ -39,6 +39,13 @@ class LeaderMatchingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = FunASRService.__new__(FunASRService)
 
+    def test_speaker_root_registers_unseen_speaker(self) -> None:
+        aliases = {"3": "2"}
+
+        self.assertEqual("5", self.service._speaker_root(aliases, "5"))
+        self.assertEqual("2", self.service._speaker_root(aliases, "3"))
+        self.assertEqual({"2": "2", "3": "2", "5": "5"}, aliases)
+
     def test_same_leader_can_match_multiple_split_speakers(self) -> None:
         matches = self.service._select_leader_matches(
             {
