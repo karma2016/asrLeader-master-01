@@ -290,7 +290,11 @@ class FunASRService:
                     pass
 
             original = str(segment.get("text", ""))
-            if self._accept_rescue_text(original, candidate, duration):
+            if self._allow_direct_rescue_replace(provider_used) and self._accept_rescue_text(
+                original,
+                candidate,
+                duration,
+            ):
                 segment.setdefault("raw_text", original)
                 segment["text"] = candidate
                 segment["asr_rescued"] = True
@@ -308,7 +312,7 @@ class FunASRService:
                 )
             else:
                 summary["rejected_segments"] += 1
-                if candidate and candidate != original:
+                if self._should_keep_rescue_candidate_hint(original, candidate, duration, provider_used):
                     segment["asr_rescue_rejected"] = True
                     segment["asr_rescue_candidate"] = candidate
                     segment["asr_rescue_reason"] = reason
@@ -674,6 +678,70 @@ class FunASRService:
         if str(self.device).startswith("cuda"):
             return self.device
         return "cpu"
+
+    @staticmethod
+    def _should_keep_rescue_candidate_hint(
+        original: str,
+        candidate: str,
+        duration: float,
+        provider: str,
+    ) -> bool:
+        original = original.strip()
+        candidate = candidate.strip()
+        if not original or not candidate or original == candidate:
+            return False
+        if provider != "qwen3-asr":
+            return True
+
+        if FunASRService._has_qwen_forbidden_term_drift(original, candidate):
+            return False
+        if re.findall(r"\d+(?:\.\d+)?", original) != re.findall(r"\d+(?:\.\d+)?", candidate):
+            return False
+        if FunASRService._negation_count(original) != FunASRService._negation_count(candidate):
+            return False
+
+        similarity = SequenceMatcher(None, original, candidate).ratio()
+        if similarity < config.ASR_QWEN_RESCUE_HINT_MIN_SIMILARITY:
+            return False
+
+        original_chars = FunASRService._content_chars(original)
+        candidate_chars = FunASRService._content_chars(candidate)
+        length_ratio = candidate_chars / max(original_chars, 1)
+        if not (
+            config.ASR_QWEN_RESCUE_HINT_MIN_LENGTH_RATIO
+            <= length_ratio
+            <= config.ASR_QWEN_RESCUE_HINT_MAX_LENGTH_RATIO
+        ):
+            return False
+
+        original_bad = FunASRService._rescue_bad_count(original)
+        candidate_bad = FunASRService._rescue_bad_count(candidate)
+        if candidate_bad > original_bad:
+            return False
+        original_noise = FunASRService._rescue_noise_count(original)
+        candidate_noise = FunASRService._rescue_noise_count(candidate)
+        if candidate_noise > original_noise:
+            return False
+        if FunASRService._domain_term_count(candidate) < FunASRService._domain_term_count(original):
+            return False
+
+        return (
+            candidate_bad < original_bad
+            or candidate_noise < original_noise
+            or FunASRService._domain_term_count(candidate) > FunASRService._domain_term_count(original)
+            or original_chars / max(duration, 0.001) < config.ASR_RESCUE_MIN_TEXT_CHARS_PER_SECOND
+        )
+
+    @staticmethod
+    def _allow_direct_rescue_replace(provider: str) -> bool:
+        return provider != "qwen3-asr" or config.ASR_QWEN_RESCUE_ALLOW_DIRECT_REPLACE
+
+    @staticmethod
+    def _has_qwen_forbidden_term_drift(original: str, candidate: str) -> bool:
+        return any(
+            term in candidate and term not in original
+            for term in config.ASR_QWEN_RESCUE_FORBIDDEN_TERMS
+        )
 
     @staticmethod
     def _accept_rescue_text(original: str, candidate: str, duration: float) -> bool:

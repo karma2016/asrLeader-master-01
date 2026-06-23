@@ -410,6 +410,13 @@ async def health():
                 "runtime_path": config.ASR_QWEN_RESCUE_RUNTIME_PATH,
                 "language": config.ASR_QWEN_RESCUE_LANGUAGE,
                 "min_segment_seconds": config.ASR_QWEN_RESCUE_MIN_SEGMENT_SECONDS,
+                "allow_direct_replace": config.ASR_QWEN_RESCUE_ALLOW_DIRECT_REPLACE,
+                "forbidden_terms": list(config.ASR_QWEN_RESCUE_FORBIDDEN_TERMS),
+                "hint_min_similarity": config.ASR_QWEN_RESCUE_HINT_MIN_SIMILARITY,
+                "hint_length_ratio": [
+                    config.ASR_QWEN_RESCUE_HINT_MIN_LENGTH_RATIO,
+                    config.ASR_QWEN_RESCUE_HINT_MAX_LENGTH_RATIO,
+                ],
                 "reason_filter": sorted(config.ASR_QWEN_RESCUE_REASON_FILTER),
             },
         },

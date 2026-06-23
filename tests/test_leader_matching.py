@@ -411,6 +411,56 @@ class LeaderMatchingTests(unittest.TestCase):
             )
         )
 
+    def test_qwen_candidate_hint_rejects_new_ascii_noise(self) -> None:
+        self.assertFalse(
+            FunASRService._should_keep_rescue_candidate_hint(
+                "call key interface test",
+                "call kick interface test",
+                10.0,
+                "qwen3-asr",
+            )
+        )
+
+    def test_qwen_candidate_hint_accepts_reduced_ascii_noise(self) -> None:
+        self.assertTrue(
+            FunASRService._should_keep_rescue_candidate_hint(
+                "call abc key test",
+                "call key key test",
+                10.0,
+                "qwen3-asr",
+            )
+        )
+
+    def test_qwen_candidate_hint_rejects_forbidden_term_drift(self) -> None:
+        with patch.object(config, "ASR_QWEN_RESCUE_FORBIDDEN_TERMS", ("申小助手",)):
+            self.assertFalse(
+                FunASRService._should_keep_rescue_candidate_hint(
+                    "申小助里面的共性知识库 no",
+                    "申小助手里面的共性知识库",
+                    10.0,
+                    "qwen3-asr",
+                )
+            )
+
+    def test_non_qwen_candidate_hint_keeps_existing_behavior(self) -> None:
+        self.assertTrue(
+            FunASRService._should_keep_rescue_candidate_hint(
+                "call key interface test",
+                "call kick interface test",
+                10.0,
+                "sensevoice",
+            )
+        )
+
+    def test_qwen_direct_replacement_disabled_by_default(self) -> None:
+        with patch.object(config, "ASR_QWEN_RESCUE_ALLOW_DIRECT_REPLACE", False):
+            self.assertFalse(FunASRService._allow_direct_rescue_replace("qwen3-asr"))
+            self.assertTrue(FunASRService._allow_direct_rescue_replace("sensevoice"))
+
+    def test_qwen_direct_replacement_can_be_enabled(self) -> None:
+        with patch.object(config, "ASR_QWEN_RESCUE_ALLOW_DIRECT_REPLACE", True):
+            self.assertTrue(FunASRService._allow_direct_rescue_replace("qwen3-asr"))
+
     def test_rescue_result_text_strips_sensevoice_tags(self) -> None:
         text = FunASRService._rescue_results_text(
             [{"text": "<|zh|><|NEUTRAL|><|Speech|><|withitn|>测试环境"}]
