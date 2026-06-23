@@ -168,6 +168,27 @@ DEFAULT_QWEN_RESCUE_CONTEXT = (
     "请按音频逐字转写，不要总结，不要润色。"
 )
 ASR_QWEN_RESCUE_CONTEXT = os.getenv("ASR_QWEN_RESCUE_CONTEXT", "").strip() or DEFAULT_QWEN_RESCUE_CONTEXT
+ASR_FIRERED_RESCUE_MODEL_TYPE = os.getenv("ASR_FIRERED_RESCUE_MODEL_TYPE", "aed").strip().lower() or "aed"
+ASR_FIRERED_RESCUE_MODEL = os.getenv("ASR_FIRERED_RESCUE_MODEL", "").strip()
+if not ASR_FIRERED_RESCUE_MODEL:
+    local_firered_model = MODELS_DIR / "FireRedASR2-AED"
+    data_firered_model = DATA_DIR / "fireredasr2-aed"
+    if local_firered_model.is_dir():
+        ASR_FIRERED_RESCUE_MODEL = str(local_firered_model)
+    elif data_firered_model.is_dir():
+        ASR_FIRERED_RESCUE_MODEL = str(data_firered_model)
+    else:
+        ASR_FIRERED_RESCUE_MODEL = str(data_firered_model)
+ASR_FIRERED_RESCUE_RUNTIME_PATH = os.getenv(
+    "ASR_FIRERED_RESCUE_RUNTIME_PATH",
+    str(DATA_DIR / "fireredasr2s_runtime"),
+).strip()
+ASR_FIRERED_RESCUE_USE_GPU = _bool_env("ASR_FIRERED_RESCUE_USE_GPU", True)
+ASR_FIRERED_RESCUE_USE_HALF = _bool_env("ASR_FIRERED_RESCUE_USE_HALF", False)
+ASR_FIRERED_RESCUE_BEAM_SIZE = int(os.getenv("ASR_FIRERED_RESCUE_BEAM_SIZE", "3"))
+ASR_FIRERED_RESCUE_NBEST = int(os.getenv("ASR_FIRERED_RESCUE_NBEST", "1"))
+ASR_FIRERED_RESCUE_RETURN_TIMESTAMP = _bool_env("ASR_FIRERED_RESCUE_RETURN_TIMESTAMP", False)
+ASR_FIRERED_RESCUE_ALLOW_DIRECT_REPLACE = _bool_env("ASR_FIRERED_RESCUE_ALLOW_DIRECT_REPLACE", False)
 ASR_RESCUE_LANGUAGE = os.getenv("ASR_RESCUE_LANGUAGE", "zh").strip() or "zh"
 ASR_RESCUE_USE_ITN = _bool_env("ASR_RESCUE_USE_ITN", True)
 ASR_RESCUE_MERGE_VAD = _bool_env("ASR_RESCUE_MERGE_VAD", True)

@@ -148,10 +148,13 @@ class FunASRService:
         self.model: AutoModel | None = None
         self.rescue_model: Any = None
         self.qwen_rescue_model: Any = None
+        self.firered_rescue_model: Any = None
         self._rescue_model_lock = threading.Lock()
         self._qwen_rescue_model_lock = threading.Lock()
+        self._firered_rescue_model_lock = threading.Lock()
         self._rescue_model_failed = False
         self._qwen_rescue_model_failed = False
+        self._firered_rescue_model_failed = False
 
     def load(self) -> None:
         logger.info("Loading FunASR models")
@@ -266,9 +269,8 @@ class FunASRService:
                 break
             summary["total_audio_seconds"] = round(summary["total_audio_seconds"] + duration, 2)
             clip_path = self._extract_rescue_clip(audio_path, segment["start_time"], segment["end_time"])
-            provider_used = config.ASR_RESCUE_PROVIDER
             try:
-                candidate, provider_used = self._recognize_rescue_clip(
+                attempts = self._recognize_rescue_clip_candidates(
                     clip_path,
                     selected_hotwords,
                     reason,
@@ -290,11 +292,28 @@ class FunASRService:
                     pass
 
             original = str(segment.get("text", ""))
-            if self._allow_direct_rescue_replace(provider_used) and self._accept_rescue_text(
-                original,
-                candidate,
-                duration,
-            ):
+            accepted: tuple[str, str] | None = None
+            best_hint: tuple[float, str, str] | None = None
+            first_rejected: tuple[str, str] | None = None
+            for candidate, provider_used in attempts:
+                candidate = str(candidate or "").strip()
+                if not candidate:
+                    continue
+                if (
+                    self._allow_direct_rescue_replace(provider_used)
+                    and self._accept_rescue_text(original, candidate, duration)
+                ):
+                    accepted = (candidate, provider_used)
+                    break
+                if first_rejected is None:
+                    first_rejected = (candidate, provider_used)
+                if self._should_keep_rescue_candidate_hint(original, candidate, duration, provider_used):
+                    score = self._rescue_candidate_hint_score(original, candidate, duration)
+                    if best_hint is None or score > best_hint[0]:
+                        best_hint = (score, candidate, provider_used)
+
+            if accepted is not None:
+                candidate, provider_used = accepted
                 segment.setdefault("raw_text", original)
                 segment["text"] = candidate
                 segment["asr_rescued"] = True
@@ -312,20 +331,26 @@ class FunASRService:
                 )
             else:
                 summary["rejected_segments"] += 1
-                if self._should_keep_rescue_candidate_hint(original, candidate, duration, provider_used):
+                if best_hint is not None:
+                    _, candidate, provider_used = best_hint
                     segment["asr_rescue_rejected"] = True
                     segment["asr_rescue_candidate"] = candidate
                     segment["asr_rescue_reason"] = reason
                     segment["asr_rescue_provider"] = provider_used
-                self._append_rescue_audit_sample(
-                    summary,
-                    "rejected_samples",
-                    segment,
-                    original,
-                    candidate,
-                    reason,
-                    provider_used,
-                )
+                elif first_rejected is not None:
+                    candidate, provider_used = first_rejected
+                else:
+                    candidate, provider_used = "", config.ASR_RESCUE_PROVIDER
+                if candidate:
+                    self._append_rescue_audit_sample(
+                        summary,
+                        "rejected_samples",
+                        segment,
+                        original,
+                        candidate,
+                        reason,
+                        provider_used,
+                    )
 
         return rescued, summary
 
@@ -493,6 +518,10 @@ class FunASRService:
     def _rescue_provider_model_name(provider: str) -> str | None:
         if provider == "sensevoice":
             return config.ASR_RESCUE_MODEL
+        if provider in {"firered", "fireredasr2", "firered_asr2"}:
+            return config.ASR_FIRERED_RESCUE_MODEL
+        if provider in {"firered_sensevoice", "firered-sensevoice"}:
+            return f"firered:{config.ASR_FIRERED_RESCUE_MODEL}; sensevoice:{config.ASR_RESCUE_MODEL}"
         if provider in {"qwen3", "qwen3-asr", "qwen3_asr"}:
             return config.ASR_QWEN_RESCUE_MODEL
         if provider in {"hybrid", "qwen3_sensevoice", "qwen3-sensevoice"}:
@@ -509,6 +538,22 @@ class FunASRService:
         provider = config.ASR_RESCUE_PROVIDER
         if provider in {"off", "none", "disabled"}:
             return "", "off"
+        if provider in {"firered", "fireredasr2", "firered_asr2"}:
+            try:
+                return self._recognize_firered_rescue_clip(clip_path), "fireredasr2"
+            except Exception as exc:
+                logger.warning("FireRedASR2 rescue ASR unavailable, falling back to FunASR: %s", exc)
+                return self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"
+        if provider in {"firered_sensevoice", "firered-sensevoice"}:
+            try:
+                return self._recognize_firered_rescue_clip(clip_path), "fireredasr2"
+            except Exception as exc:
+                logger.warning("FireRedASR2 rescue ASR unavailable, falling back to SenseVoice/FunASR: %s", exc)
+            try:
+                return self._recognize_sensevoice_rescue_clip(clip_path), "sensevoice"
+            except Exception as exc:
+                logger.warning("SenseVoice rescue ASR unavailable, falling back to FunASR: %s", exc)
+                return self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"
         if provider in {"qwen3", "qwen3-asr", "qwen3_asr"}:
             try:
                 return self._recognize_qwen3_rescue_clip(clip_path), "qwen3-asr"
@@ -533,6 +578,30 @@ class FunASRService:
                 logger.warning("SenseVoice rescue ASR unavailable, falling back to FunASR: %s", exc)
                 return self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"
         return self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"
+
+    def _recognize_rescue_clip_candidates(
+        self,
+        clip_path: str,
+        hotwords: str | None,
+        reason: str = "",
+        duration: float = 0.0,
+    ) -> list[tuple[str, str]]:
+        provider = config.ASR_RESCUE_PROVIDER
+        if provider not in {"firered_sensevoice", "firered-sensevoice"}:
+            return [self._recognize_rescue_clip(clip_path, hotwords, reason, duration)]
+
+        candidates: list[tuple[str, str]] = []
+        try:
+            candidates.append((self._recognize_firered_rescue_clip(clip_path), "fireredasr2"))
+        except Exception as exc:
+            logger.warning("FireRedASR2 rescue ASR unavailable, falling back to SenseVoice/FunASR: %s", exc)
+        try:
+            candidates.append((self._recognize_sensevoice_rescue_clip(clip_path), "sensevoice"))
+        except Exception as exc:
+            logger.warning("SenseVoice rescue ASR unavailable, falling back to FunASR: %s", exc)
+            if not candidates:
+                candidates.append((self._recognize_funasr_rescue_clip(clip_path, hotwords), "funasr"))
+        return candidates
 
     @staticmethod
     def _should_use_qwen_rescue(reason: str, duration: float) -> bool:
@@ -582,6 +651,15 @@ class FunASRService:
             return ""
         text = str(getattr(results[0], "text", "") or "").strip()
         return normalize_asr_text(text)
+
+    def _recognize_firered_rescue_clip(self, clip_path: str) -> str:
+        model = self._ensure_firered_rescue_model()
+        uttid = Path(clip_path).stem
+        results = model.transcribe([uttid], [clip_path])
+        if not results:
+            return ""
+        texts = [str(item.get("text", "")) for item in results if isinstance(item, dict)]
+        return normalize_asr_text("".join(texts).strip())
 
     @staticmethod
     def _rescue_results_text(raw_results: Any) -> str:
@@ -660,6 +738,47 @@ class FunASRService:
                 self._qwen_rescue_model_failed = True
                 raise
 
+    def _ensure_firered_rescue_model(self) -> Any:
+        if self.firered_rescue_model is not None:
+            return self.firered_rescue_model
+        if self._firered_rescue_model_failed:
+            raise RuntimeError("FireRedASR2 rescue model is unavailable")
+        with self._firered_rescue_model_lock:
+            if self.firered_rescue_model is not None:
+                return self.firered_rescue_model
+            if self._firered_rescue_model_failed:
+                raise RuntimeError("FireRedASR2 rescue model is unavailable")
+            try:
+                runtime_path = config.ASR_FIRERED_RESCUE_RUNTIME_PATH
+                if runtime_path and Path(runtime_path).is_dir() and runtime_path not in sys.path:
+                    sys.path.insert(0, runtime_path)
+                from fireredasr2s.fireredasr2 import FireRedAsr2, FireRedAsr2Config
+
+                use_gpu = config.ASR_FIRERED_RESCUE_USE_GPU and str(self.device).startswith("cuda")
+                asr_config = FireRedAsr2Config(
+                    use_gpu=use_gpu,
+                    use_half=config.ASR_FIRERED_RESCUE_USE_HALF,
+                    beam_size=config.ASR_FIRERED_RESCUE_BEAM_SIZE,
+                    nbest=config.ASR_FIRERED_RESCUE_NBEST,
+                    return_timestamp=config.ASR_FIRERED_RESCUE_RETURN_TIMESTAMP,
+                )
+                logger.info(
+                    "Loading FireRedASR2 rescue model: type=%s, model=%s, use_gpu=%s",
+                    config.ASR_FIRERED_RESCUE_MODEL_TYPE,
+                    config.ASR_FIRERED_RESCUE_MODEL,
+                    use_gpu,
+                )
+                self.firered_rescue_model = FireRedAsr2.from_pretrained(
+                    config.ASR_FIRERED_RESCUE_MODEL_TYPE,
+                    config.ASR_FIRERED_RESCUE_MODEL,
+                    asr_config,
+                )
+                logger.info("FireRedASR2 rescue model is ready: %s", config.ASR_FIRERED_RESCUE_MODEL)
+                return self.firered_rescue_model
+            except Exception:
+                self._firered_rescue_model_failed = True
+                raise
+
     @staticmethod
     def _qwen_torch_dtype(torch_module: Any) -> Any:
         mapping = {
@@ -734,7 +853,34 @@ class FunASRService:
 
     @staticmethod
     def _allow_direct_rescue_replace(provider: str) -> bool:
-        return provider != "qwen3-asr" or config.ASR_QWEN_RESCUE_ALLOW_DIRECT_REPLACE
+        if provider == "qwen3-asr":
+            return config.ASR_QWEN_RESCUE_ALLOW_DIRECT_REPLACE
+        if provider == "fireredasr2":
+            return config.ASR_FIRERED_RESCUE_ALLOW_DIRECT_REPLACE
+        return True
+
+    @staticmethod
+    def _rescue_candidate_hint_score(original: str, candidate: str, duration: float) -> float:
+        original_bad = FunASRService._rescue_bad_count(original)
+        candidate_bad = FunASRService._rescue_bad_count(candidate)
+        original_noise = FunASRService._rescue_noise_count(original)
+        candidate_noise = FunASRService._rescue_noise_count(candidate)
+        original_domain = FunASRService._domain_term_count(original)
+        candidate_domain = FunASRService._domain_term_count(candidate)
+        original_chars = FunASRService._content_chars(original)
+        candidate_chars = FunASRService._content_chars(candidate)
+        density_gain = (
+            candidate_chars / max(duration, 0.001)
+            - original_chars / max(duration, 0.001)
+        )
+        similarity = SequenceMatcher(None, original, candidate).ratio()
+        return (
+            (original_bad - candidate_bad) * 100.0
+            + (original_noise - candidate_noise) * 40.0
+            + (candidate_domain - original_domain) * 25.0
+            + min(20.0, density_gain * 5.0)
+            + similarity * 10.0
+        )
 
     @staticmethod
     def _has_qwen_forbidden_term_drift(original: str, candidate: str) -> bool:

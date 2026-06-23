@@ -3,14 +3,16 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.txt requirements-firered.txt ./
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip config set global.trusted-host mirrors.aliyun.com && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements-firered.txt
 
 COPY app/ ./app/
 COPY scripts/install_qwen3_asr_rescue.sh ./scripts/install_qwen3_asr_rescue.sh
-RUN chmod +x ./scripts/install_qwen3_asr_rescue.sh
+COPY scripts/install_fireredasr2_rescue.sh ./scripts/install_fireredasr2_rescue.sh
+RUN chmod +x ./scripts/install_qwen3_asr_rescue.sh ./scripts/install_fireredasr2_rescue.sh
 
 ENV ASR_DEVICE=cuda:0
 ENV MODELS_DIR=/models

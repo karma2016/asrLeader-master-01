@@ -500,6 +500,66 @@ class LeaderMatchingTests(unittest.TestCase):
         self.assertEqual("fallback text", text)
         self.assertEqual("funasr", provider)
 
+    def test_firered_rescue_provider_falls_back_to_funasr(self) -> None:
+        service = FunASRService.__new__(FunASRService)
+        with (
+            patch.object(config, "ASR_RESCUE_PROVIDER", "firered"),
+            patch.object(
+                FunASRService,
+                "_recognize_firered_rescue_clip",
+                side_effect=RuntimeError("missing firered"),
+            ),
+            patch.object(FunASRService, "_recognize_funasr_rescue_clip", return_value="fallback text"),
+        ):
+            text, provider = service._recognize_rescue_clip("clip.wav", "", "long_segment", 20.0)
+
+        self.assertEqual("fallback text", text)
+        self.assertEqual("funasr", provider)
+
+    def test_firered_sensevoice_provider_falls_back_to_sensevoice(self) -> None:
+        service = FunASRService.__new__(FunASRService)
+        with (
+            patch.object(config, "ASR_RESCUE_PROVIDER", "firered_sensevoice"),
+            patch.object(
+                FunASRService,
+                "_recognize_firered_rescue_clip",
+                side_effect=RuntimeError("missing firered"),
+            ),
+            patch.object(FunASRService, "_recognize_sensevoice_rescue_clip", return_value="sensevoice text"),
+        ):
+            text, provider = service._recognize_rescue_clip("clip.wav", "", "long_segment", 20.0)
+
+        self.assertEqual("sensevoice text", text)
+        self.assertEqual("sensevoice", provider)
+
+    def test_firered_sensevoice_provider_returns_ranked_candidates(self) -> None:
+        service = FunASRService.__new__(FunASRService)
+        with (
+            patch.object(config, "ASR_RESCUE_PROVIDER", "firered_sensevoice"),
+            patch.object(FunASRService, "_recognize_firered_rescue_clip", return_value="firered text"),
+            patch.object(FunASRService, "_recognize_sensevoice_rescue_clip", return_value="sensevoice text"),
+        ):
+            candidates = service._recognize_rescue_clip_candidates("clip.wav", "", "long_segment", 20.0)
+
+        self.assertEqual([("firered text", "fireredasr2"), ("sensevoice text", "sensevoice")], candidates)
+
+    def test_firered_direct_replace_is_config_gated(self) -> None:
+        with patch.object(config, "ASR_FIRERED_RESCUE_ALLOW_DIRECT_REPLACE", False):
+            self.assertFalse(FunASRService._allow_direct_rescue_replace("fireredasr2"))
+        with patch.object(config, "ASR_FIRERED_RESCUE_ALLOW_DIRECT_REPLACE", True):
+            self.assertTrue(FunASRService._allow_direct_rescue_replace("fireredasr2"))
+
+    def test_firered_rescue_provider_model_name_reports_pipeline(self) -> None:
+        with (
+            patch.object(config, "ASR_FIRERED_RESCUE_MODEL", "firered-model"),
+            patch.object(config, "ASR_RESCUE_MODEL", "sensevoice-model"),
+        ):
+            self.assertEqual("firered-model", FunASRService._rescue_provider_model_name("firered"))
+            self.assertEqual(
+                "firered:firered-model; sensevoice:sensevoice-model",
+                FunASRService._rescue_provider_model_name("firered_sensevoice"),
+            )
+
     def test_hybrid_rescue_uses_qwen_for_selected_long_segments(self) -> None:
         service = FunASRService.__new__(FunASRService)
         with (

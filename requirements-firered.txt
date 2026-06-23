@@ -1,0 +1,4 @@
+cn2an==0.5.23
+kaldi_native_fbank==1.15
+textgrid==1.6.1
+peft>=0.13.2

@@ -405,6 +405,17 @@ async def health():
             "model": asr_service._rescue_provider_model_name(config.ASR_RESCUE_PROVIDER),
             "language": config.ASR_RESCUE_LANGUAGE,
             "audit_samples": config.ASR_RESCUE_AUDIT_SAMPLES,
+            "firered": {
+                "model": config.ASR_FIRERED_RESCUE_MODEL,
+                "model_type": config.ASR_FIRERED_RESCUE_MODEL_TYPE,
+                "runtime_path": config.ASR_FIRERED_RESCUE_RUNTIME_PATH,
+                "use_gpu": config.ASR_FIRERED_RESCUE_USE_GPU,
+                "use_half": config.ASR_FIRERED_RESCUE_USE_HALF,
+                "beam_size": config.ASR_FIRERED_RESCUE_BEAM_SIZE,
+                "nbest": config.ASR_FIRERED_RESCUE_NBEST,
+                "return_timestamp": config.ASR_FIRERED_RESCUE_RETURN_TIMESTAMP,
+                "allow_direct_replace": config.ASR_FIRERED_RESCUE_ALLOW_DIRECT_REPLACE,
+            },
             "qwen": {
                 "model": config.ASR_QWEN_RESCUE_MODEL,
                 "runtime_path": config.ASR_QWEN_RESCUE_RUNTIME_PATH,

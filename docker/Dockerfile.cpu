@@ -10,15 +10,17 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg libsndfile1 && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements.txt requirements-firered.txt ./
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip config set global.trusted-host mirrors.aliyun.com && \
     pip install --no-cache-dir torch==2.11.0+cpu torchaudio==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r requirements-firered.txt
 
 COPY app/ ./app/
 COPY scripts/install_qwen3_asr_rescue.sh ./scripts/install_qwen3_asr_rescue.sh
-RUN chmod +x ./scripts/install_qwen3_asr_rescue.sh
+COPY scripts/install_fireredasr2_rescue.sh ./scripts/install_fireredasr2_rescue.sh
+RUN chmod +x ./scripts/install_qwen3_asr_rescue.sh ./scripts/install_fireredasr2_rescue.sh
 
 ENV ASR_DEVICE=cpu
 ENV MODELS_DIR=/models
